@@ -74,7 +74,7 @@ type Config struct {
 	InternalServer   internalserver.Config    `yaml:"internal_server,omitempty"`
 	Distributor      distributor.Config       `yaml:"distributor,omitempty"`
 	Querier          querier.Config           `yaml:"querier,omitempty"`
-	CompactorClient  compactor.ClientConfig   `yaml:"compactor_client,omitempty"`
+	CompactorClient  compactor.ClientConfig   `yaml:"delete_client,omitempty"`
 	IngesterClient   client.Config            `yaml:"ingester_client,omitempty"`
 	Ingester         ingester.Config          `yaml:"ingester,omitempty"`
 	StorageConfig    storage.Config           `yaml:"storage_config,omitempty"`
