@@ -1,5 +1,6 @@
 ## Main
 
+- [8173](https://github.com/grafana/loki/pull/8173) **periklis**: Remove custom webhook cert mounts for OLM-based deployment (OpenShift)
 - [8068](https://github.com/grafana/loki/pull/8068) **periklis**: Use lokistack-gateway replicas from size table
 - [7753](https://github.com/grafana/loki/pull/7753) **periklis**: Check for mandatory CA configmap name in ObjectStorageTLS spec
 - [7744](https://github.com/grafana/loki/pull/7744) **periklis**: Fix object storage TLS spec CAKey descriptor
