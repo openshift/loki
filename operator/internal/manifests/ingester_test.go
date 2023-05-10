@@ -1,15 +1,14 @@
-package manifests_test
+package manifests
 
 import (
 	"testing"
 
 	lokiv1 "github.com/grafana/loki/operator/apis/loki/v1"
-	"github.com/grafana/loki/operator/internal/manifests"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNewIngesterStatefulSet_HasTemplateConfigHashAnnotation(t *testing.T) {
-	ss := manifests.NewIngesterStatefulSet(manifests.Options{
+	ss := NewIngesterStatefulSet(Options{
 		Name:       "abcd",
 		Namespace:  "efgh",
 		ConfigSHA1: "deadbeef",
@@ -36,7 +35,7 @@ func TestNewIngesterStatefulSet_SelectorMatchesLabels(t *testing.T) {
 	// failing to specify a matching Pod Selector will result in a validation error
 	// during StatefulSet creation.
 	// See https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#pod-selector
-	sts := manifests.NewIngesterStatefulSet(manifests.Options{
+	sts := NewIngesterStatefulSet(Options{
 		Name:      "abcd",
 		Namespace: "efgh",
 		Stack: lokiv1.LokiStackSpec{

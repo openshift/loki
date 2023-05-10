@@ -1,4 +1,4 @@
-package manifests_test
+package manifests
 
 import (
 	"encoding/json"
@@ -7,7 +7,6 @@ import (
 
 	"github.com/google/uuid"
 	lokiv1 "github.com/grafana/loki/operator/apis/loki/v1"
-	"github.com/grafana/loki/operator/internal/manifests"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -17,18 +16,18 @@ import (
 func TestConfigMap_ReturnsSHA1OfBinaryContents(t *testing.T) {
 	opts := randomConfigOptions()
 
-	_, sha1C, err := manifests.LokiConfigMap(opts)
+	_, sha1C, err := LokiConfigMap(opts)
 	require.NoError(t, err)
 	require.NotEmpty(t, sha1C)
 }
 
 func TestConfigOptions_UserOptionsTakePrecedence(t *testing.T) {
 	// regardless of what is provided by the default sizing parameters we should always prefer
-	// the user-defined values. This creates an all-inclusive manifests.Options and then checks
+	// the user-defined values. This creates an all-inclusive Options and then checks
 	// that every value is present in the result
 	opts := randomConfigOptions()
 
-	res := manifests.ConfigOptions(opts)
+	res := ConfigOptions(opts)
 
 	expected, err := json.Marshal(opts.Stack)
 	require.NoError(t, err)
@@ -39,8 +38,8 @@ func TestConfigOptions_UserOptionsTakePrecedence(t *testing.T) {
 	assert.JSONEq(t, string(expected), string(actual))
 }
 
-func randomConfigOptions() manifests.Options {
-	return manifests.Options{
+func randomConfigOptions() Options {
+	return Options{
 		Name:      uuid.New().String(),
 		Namespace: uuid.New().String(),
 		Image:     uuid.New().String(),

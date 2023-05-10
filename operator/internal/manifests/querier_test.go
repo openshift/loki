@@ -1,15 +1,14 @@
-package manifests_test
+package manifests
 
 import (
 	"testing"
 
 	lokiv1 "github.com/grafana/loki/operator/apis/loki/v1"
-	"github.com/grafana/loki/operator/internal/manifests"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNewQuerierDeployment_HasTemplateConfigHashAnnotation(t *testing.T) {
-	ss := manifests.NewQuerierDeployment(manifests.Options{
+	ss := NewQuerierDeployment(Options{
 		Name:       "abcd",
 		Namespace:  "efgh",
 		ConfigSHA1: "deadbeef",
@@ -36,7 +35,7 @@ func TestNewQuerierDeployment_SelectorMatchesLabels(t *testing.T) {
 	// failing to specify a matching Pod Selector will result in a validation error
 	// during Deployment creation.
 	// See https://kubernetes.io/docs/concepts/workloads/controllers/statefulset/#pod-selector
-	ss := manifests.NewQuerierDeployment(manifests.Options{
+	ss := NewQuerierDeployment(Options{
 		Name:      "abcd",
 		Namespace: "efgh",
 		Stack: lokiv1.LokiStackSpec{
