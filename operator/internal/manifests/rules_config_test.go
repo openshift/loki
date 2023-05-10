@@ -1,18 +1,17 @@
-package manifests_test
+package manifests
 
 import (
 	"fmt"
 	"testing"
 
 	lokiv1beta1 "github.com/grafana/loki/operator/apis/loki/v1beta1"
-	"github.com/grafana/loki/operator/internal/manifests"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
 
 func TestRulesConfigMap_ReturnsDataEntriesPerRule(t *testing.T) {
-	cm, err := manifests.RulesConfigMap(testOptions())
+	cm, err := RulesConfigMap(testOptions())
 	require.NoError(t, err)
 	require.NotNil(t, cm)
 	require.Len(t, cm.Data, 4)
@@ -24,7 +23,7 @@ func TestRulesConfigMap_ReturnsDataEntriesPerRule(t *testing.T) {
 
 func TestRulesConfigMap_ReturnsTenantMapPerRule(t *testing.T) {
 	opts := testOptions()
-	cm, err := manifests.RulesConfigMap(opts)
+	cm, err := RulesConfigMap(opts)
 	require.NoError(t, err)
 	require.NotNil(t, cm)
 	require.Len(t, cm.Data, 4)
@@ -35,10 +34,10 @@ func TestRulesConfigMap_ReturnsTenantMapPerRule(t *testing.T) {
 	require.Contains(t, opts.Tenants.Configs["tenant-b"].RuleFiles, "prod-recording-rules-recs2.yaml")
 }
 
-func testOptions() *manifests.Options {
-	return &manifests.Options{
-		Tenants: manifests.Tenants{
-			Configs: map[string]manifests.TenantConfig{
+func testOptions() *Options {
+	return &Options{
+		Tenants: Tenants{
+			Configs: map[string]TenantConfig{
 				"tenant-a": {},
 				"tenant-b": {},
 			},

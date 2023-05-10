@@ -1,15 +1,14 @@
-package manifests_test
+package manifests
 
 import (
 	"testing"
 
 	lokiv1 "github.com/grafana/loki/operator/apis/loki/v1"
-	"github.com/grafana/loki/operator/internal/manifests"
 	"github.com/stretchr/testify/require"
 )
 
 func TestNewDistributorDeployment_SelectorMatchesLabels(t *testing.T) {
-	dpl := manifests.NewDistributorDeployment(manifests.Options{
+	dpl := NewDistributorDeployment(Options{
 		Name:      "abcd",
 		Namespace: "efgh",
 		Stack: lokiv1.LokiStackSpec{
@@ -29,7 +28,7 @@ func TestNewDistributorDeployment_SelectorMatchesLabels(t *testing.T) {
 }
 
 func TestNewDistributorDeployme_HasTemplateConfigHashAnnotation(t *testing.T) {
-	ss := manifests.NewDistributorDeployment(manifests.Options{
+	ss := NewDistributorDeployment(Options{
 		Name:       "abcd",
 		Namespace:  "efgh",
 		ConfigSHA1: "deadbeef",
