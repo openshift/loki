@@ -7,9 +7,9 @@ import (
 
 // BuildClusterRole returns a k8s ClusterRole object for the
 // lokistack gateway serviceaccount to allow creating:
-// - TokenReviews to authenticate the user by bearer token.
-// - SubjectAccessReview to authorize the user by bearer token.
-//   if having access to read/create logs.
+//   - TokenReviews to authenticate the user by bearer token.
+//   - SubjectAccessReview to authorize the user by bearer token.
+//     if having access to read/create logs.
 func BuildClusterRole(opts Options) *rbacv1.ClusterRole {
 	return &rbacv1.ClusterRole{
 		TypeMeta: metav1.TypeMeta{
