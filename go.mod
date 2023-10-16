@@ -97,10 +97,10 @@ require (
 	go.etcd.io/bbolt v1.3.6
 	go.uber.org/atomic v1.9.0
 	go.uber.org/goleak v1.1.12
-	golang.org/x/crypto v0.0.0-20211215153901-e495a2d5b3d3
-	golang.org/x/net v0.0.0-20220127200216-cd36cc0744dd
-	golang.org/x/sync v0.0.0-20210220032951-036812b2e83c
-	golang.org/x/sys v0.0.0-20220222172238-00053529121e
+	golang.org/x/crypto v0.14.0
+	golang.org/x/net v0.17.0
+	golang.org/x/sync v0.1.0
+	golang.org/x/sys v0.13.0
 	golang.org/x/time v0.0.0-20220210224613-90d013bbcef8
 	google.golang.org/api v0.70.0
 	google.golang.org/grpc v1.44.0
@@ -114,7 +114,7 @@ require (
 
 require (
 	github.com/willf/bloom v2.0.3+incompatible
-	golang.org/x/text v0.3.7
+	golang.org/x/text v0.13.0
 )
 
 require (
@@ -266,10 +266,10 @@ require (
 	go.uber.org/zap v1.19.1 // indirect
 	go4.org/intern v0.0.0-20211027215823-ae77deb06f29 // indirect
 	go4.org/unsafe/assume-no-moving-gc v0.0.0-20211027215541-db492cf91b37 // indirect
-	golang.org/x/mod v0.5.1 // indirect
+	golang.org/x/mod v0.8.0 // indirect
 	golang.org/x/oauth2 v0.0.0-20211104180415-d3ed0bb246c8 // indirect
-	golang.org/x/term v0.0.0-20210927222741-03fcf44c2211 // indirect
-	golang.org/x/tools v0.1.9 // indirect
+	golang.org/x/term v0.13.0 // indirect
+	golang.org/x/tools v0.6.0 // indirect
 	golang.org/x/xerrors v0.0.0-20200804184101-5ec99f83aff1 // indirect
 	google.golang.org/appengine v1.6.7 // indirect
 	google.golang.org/genproto v0.0.0-20220222154240-daf995802d7b // indirect
@@ -327,3 +327,6 @@ exclude k8s.io/client-go v8.0.0+incompatible
 // Replace memberlist with our fork which includes some fixes that haven't been
 // merged upstream yet.
 replace github.com/hashicorp/memberlist => github.com/grafana/memberlist v0.3.1-0.20220708130638-bd88e10a3d91
+
+// For update to newer Go runtime
+replace go4.org/unsafe/assume-no-moving-gc => go4.org/unsafe/assume-no-moving-gc v0.0.0-20230525183740-e7c30c78aeb2
