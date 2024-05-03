@@ -2,6 +2,7 @@
 
 ## Release 5.7.14
 
+- [12874](https://github.com/grafana/loki/pull/12874) **periklis**: chore(operator): Update Loki operand to v2.9.8
 - [12698](https://github.com/grafana/loki/pull/12698) **periklis**: chore(deps): bump golang.org/x/net from 0.21.0 to 0.23.0 in /operator
 - [12503](https://github.com/grafana/loki/pull/12503) **periklis**: fix(operator): Bump golang builder to 1.21.9
 
