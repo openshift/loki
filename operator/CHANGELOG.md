@@ -2,6 +2,7 @@
 
 ## Release 6.0.1
 
+- [14416](https://github.com/grafana/loki/pull/14416) **periklis**: chore(operator): Update build and runtime deps
 - [14331](https://github.com/grafana/loki/pull/14331) **periklis**: feat!(operator): Update Loki operand to v3.2.0
 - [14314](https://github.com/grafana/loki/pull/14314) **periklis**: fix(operator): Use empty initiliazed pod status map when no pods
 - [14308](https://github.com/grafana/loki/pull/14308) **periklis**: feat(operator): Declare feature FIPS support for OpenShift only
