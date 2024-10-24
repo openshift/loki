@@ -2,6 +2,7 @@
 
 ## Release 5.9.9
 
+- [14587](https://github.com/grafana/loki/pull/14587) **JoaoBraveCoding**: fix(operator): correctly ignore again BlotDB dashboards
 - [14447](https://github.com/grafana/loki/pull/14447) **periklis**: refactor(operator)!: Migrate project layout to kubebuilder go/v4
 - [14526](https://github.com/grafana/loki/pull/14526) **periklis**: feat(operator): Update Loki operand to v3.2.1
 - [14445](https://github.com/grafana/loki/pull/14445) **periklis**: chore(operator): Upgrade operator-sdk 1.37.0 and kind 0.23.0
