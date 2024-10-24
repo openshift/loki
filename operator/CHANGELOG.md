@@ -1,5 +1,9 @@
 ## Main
 
+## Release 5.8.16
+
+- [14587](https://github.com/grafana/loki/pull/14587) **JoaoBraveCoding**: fix(operator): correctly ignore again BlotDB dashboards
+
 ## Release 5.8.15
 
 - [14526](https://github.com/grafana/loki/pull/14526) **periklis**: feat(operator): Update Loki operand to v3.2.1
