@@ -2,6 +2,8 @@
 
 ## Release 5.9.9
 
+- [14613](https://github.com/grafana/loki/pull/14613) **xperimental**: fix(operator): Disable log level discovery for OpenShift tenancy modes
+- [14506](https://github.com/grafana/loki/pull/14506) **xperimental**: fix(operator): Disable automatic discovery of service name
 - [14587](https://github.com/grafana/loki/pull/14587) **JoaoBraveCoding**: fix(operator): correctly ignore again BlotDB dashboards
 - [14447](https://github.com/grafana/loki/pull/14447) **periklis**: refactor(operator)!: Migrate project layout to kubebuilder go/v4
 - [14526](https://github.com/grafana/loki/pull/14526) **periklis**: feat(operator): Update Loki operand to v3.2.1
