@@ -1,15 +1,17 @@
 package swift
 
 import (
+	"net/http"
+
 	"github.com/go-kit/log"
 	"github.com/prometheus/common/model"
 	"github.com/thanos-io/objstore"
+	"github.com/thanos-io/objstore/exthttp"
 	"github.com/thanos-io/objstore/providers/swift"
-	yaml "gopkg.in/yaml.v2"
 )
 
 // NewBucketClient creates a new Swift bucket client
-func NewBucketClient(cfg Config, _ string, logger log.Logger) (objstore.Bucket, error) {
+func NewBucketClient(cfg Config, _ string, logger log.Logger, wrapper func(http.RoundTripper) http.RoundTripper) (objstore.Bucket, error) {
 	bucketConfig := swift.Config{
 		AuthVersion:       cfg.AuthVersion,
 		AuthUrl:           cfg.AuthURL,
@@ -33,14 +35,9 @@ func NewBucketClient(cfg Config, _ string, logger log.Logger) (objstore.Bucket, 
 		// Hard-coded defaults.
 		ChunkSize:              swift.DefaultConfig.ChunkSize,
 		UseDynamicLargeObjects: false,
+		HTTPConfig:             exthttp.DefaultHTTPConfig,
 	}
+	bucketConfig.HTTPConfig.Transport = cfg.Transport
 
-	// Thanos currently doesn't support passing the config as is, but expects a YAML,
-	// so we're going to serialize it.
-	serialized, err := yaml.Marshal(bucketConfig)
-	if err != nil {
-		return nil, err
-	}
-
-	return swift.NewContainer(logger, serialized, nil)
+	return swift.NewContainerFromConfig(logger, &bucketConfig, false, wrapper)
 }
