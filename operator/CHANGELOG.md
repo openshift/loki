@@ -1,5 +1,9 @@
 ## Main
 
+## Release 6.0.3
+
+- [14752](https://github.com/grafana/loki/pull/14752) **periklis**: Add support for managed GCP WorkloadIdentity
+
 ## Release 6.0.2
 
 - [14613](https://github.com/grafana/loki/pull/14613) **xperimental**: fix(operator): Disable log level discovery for OpenShift tenancy modes
