@@ -84,9 +84,12 @@ type Limits struct {
 	MaxLineSize                 flagext.ByteSize `yaml:"max_line_size" json:"max_line_size"`
 	MaxLineSizeTruncate         bool             `yaml:"max_line_size_truncate" json:"max_line_size_truncate"`
 	IncrementDuplicateTimestamp bool             `yaml:"increment_duplicate_timestamp" json:"increment_duplicate_timestamp"`
-	DiscoverServiceName         []string         `yaml:"discover_service_name" json:"discover_service_name"`
-	DiscoverLogLevels           bool             `yaml:"discover_log_levels" json:"discover_log_levels"`
-	LogLevelFields              []string         `yaml:"log_level_fields" json:"log_level_fields"`
+
+	// Metadata field extraction
+	DiscoverGenericFields FieldDetectorConfig `yaml:"discover_generic_fields" json:"discover_generic_fields" doc:"description=Experimental: Detect fields from stream labels, structured metadata, or json/logfmt formatted log line and put them into structured metadata of the log entry."`
+	DiscoverServiceName   []string            `yaml:"discover_service_name" json:"discover_service_name"`
+	DiscoverLogLevels     bool                `yaml:"discover_log_levels" json:"discover_log_levels"`
+	LogLevelFields        []string            `yaml:"log_level_fields" json:"log_level_fields"`
 
 	// Ingester enforced limits.
 	UseOwnedStreamCount     bool             `yaml:"use_owned_stream_count" json:"use_owned_stream_count"`
@@ -214,6 +217,7 @@ type Limits struct {
 	BloomSplitSeriesKeyspaceBy     int              `yaml:"bloom_split_series_keyspace_by" json:"bloom_split_series_keyspace_by" category:"experimental"`
 	BloomTaskTargetSeriesChunkSize flagext.ByteSize `yaml:"bloom_task_target_series_chunk_size" json:"bloom_task_target_series_chunk_size" category:"experimental"`
 	BloomBlockEncoding             string           `yaml:"bloom_block_encoding" json:"bloom_block_encoding" category:"experimental"`
+	BloomPrefetchBlocks            bool             `yaml:"bloom_prefetch_blocks" json:"bloom_prefetch_blocks" category:"experimental"`
 
 	BloomMaxBlockSize flagext.ByteSize `yaml:"bloom_max_block_size" json:"bloom_max_block_size" category:"experimental"`
 	BloomMaxBloomSize flagext.ByteSize `yaml:"bloom_max_bloom_size" json:"bloom_max_bloom_size" category:"experimental"`
@@ -226,6 +230,7 @@ type Limits struct {
 
 	BlockIngestionUntil      dskit_flagext.Time `yaml:"block_ingestion_until" json:"block_ingestion_until"`
 	BlockIngestionStatusCode int                `yaml:"block_ingestion_status_code" json:"block_ingestion_status_code"`
+	EnforcedLabels           []string           `yaml:"enforced_labels" json:"enforced_labels" category:"experimental"`
 
 	IngestionPartitionsTenantShardSize int `yaml:"ingestion_partitions_tenant_shard_size" json:"ingestion_partitions_tenant_shard_size" category:"experimental"`
 
@@ -241,6 +246,10 @@ type Limits struct {
 	S3SSEType                 string `yaml:"s3_sse_type" json:"s3_sse_type" doc:"nocli|description=S3 server-side encryption type. Required to enable server-side encryption overrides for a specific tenant. If not set, the default S3 client settings are used."`
 	S3SSEKMSKeyID             string `yaml:"s3_sse_kms_key_id" json:"s3_sse_kms_key_id" doc:"nocli|description=S3 server-side encryption KMS Key ID. Ignored if the SSE type override is not set."`
 	S3SSEKMSEncryptionContext string `yaml:"s3_sse_kms_encryption_context" json:"s3_sse_kms_encryption_context" doc:"nocli|description=S3 server-side encryption KMS encryption context. If unset and the key ID override is set, the encryption context will not be provided to S3. Ignored if the SSE type override is not set."`
+}
+
+type FieldDetectorConfig struct {
+	Fields map[string][]string `yaml:"fields,omitempty" json:"fields,omitempty"`
 }
 
 type StreamRetention struct {
@@ -399,6 +408,7 @@ func (l *Limits) RegisterFlags(f *flag.FlagSet) {
 	f.DurationVar(&l.BloomGatewayCacheKeyInterval, "bloom-gateway.cache-key-interval", 15*time.Minute, "Experimental. Interval for computing the cache key in the Bloom Gateway.")
 
 	f.StringVar(&l.BloomBlockEncoding, "bloom-build.block-encoding", "none", "Experimental. Compression algorithm for bloom block pages.")
+	f.BoolVar(&l.BloomPrefetchBlocks, "bloom-build.prefetch-blocks", false, "Experimental. Prefetch blocks on bloom gateways as soon as they are built.")
 
 	_ = l.BloomMaxBlockSize.Set(defaultBloomBuildMaxBlockSize)
 	f.Var(&l.BloomMaxBlockSize, "bloom-build.max-block-size",
@@ -426,7 +436,6 @@ func (l *Limits) RegisterFlags(f *flag.FlagSet) {
 	)
 
 	l.ShardStreams.RegisterFlagsWithPrefix("shard-streams", f)
-
 	f.IntVar(&l.VolumeMaxSeries, "limits.volume-max-series", 1000, "The default number of aggregated series or labels that can be returned from a log-volume endpoint")
 
 	f.BoolVar(&l.AllowStructuredMetadata, "validation.allow-structured-metadata", true, "Allow user to send structured metadata (non-indexed labels) in push payload.")
@@ -437,6 +446,7 @@ func (l *Limits) RegisterFlags(f *flag.FlagSet) {
 
 	f.Var(&l.BlockIngestionUntil, "limits.block-ingestion-until", "Block ingestion until the configured date. The time should be in RFC3339 format.")
 	f.IntVar(&l.BlockIngestionStatusCode, "limits.block-ingestion-status-code", defaultBlockedIngestionStatusCode, "HTTP status code to return when ingestion is blocked. If 200, the ingestion will be blocked without returning an error to the client. By Default, a custom status code (260) is returned to the client along with an error message.")
+	f.Var((*dskit_flagext.StringSlice)(&l.EnforcedLabels), "validation.enforced-labels", "List of labels that must be present in the stream. If any of the labels are missing, the stream will be discarded. This flag configures it globally for all tenants. Experimental.")
 
 	f.IntVar(&l.IngestionPartitionsTenantShardSize, "limits.ingestion-partition-tenant-shard-size", 0, "The number of partitions a tenant's data should be sharded to when using kafka ingestion. Tenants are sharded across partitions using shuffle-sharding. 0 disables shuffle sharding and tenant is sharded across all partitions.")
 
@@ -994,6 +1004,10 @@ func (o *Overrides) IncrementDuplicateTimestamps(userID string) bool {
 	return o.getOverridesForUser(userID).IncrementDuplicateTimestamp
 }
 
+func (o *Overrides) DiscoverGenericFields(userID string) map[string][]string {
+	return o.getOverridesForUser(userID).DiscoverGenericFields.Fields
+}
+
 func (o *Overrides) DiscoverServiceName(userID string) []string {
 	return o.getOverridesForUser(userID).DiscoverServiceName
 }
@@ -1055,6 +1069,10 @@ func (o *Overrides) BuilderResponseTimeout(userID string) time.Duration {
 	return o.getOverridesForUser(userID).BloomBuilderResponseTimeout
 }
 
+func (o *Overrides) PrefetchBloomBlocks(userID string) bool {
+	return o.getOverridesForUser(userID).BloomPrefetchBlocks
+}
+
 func (o *Overrides) BloomTaskMaxRetries(userID string) int {
 	return o.getOverridesForUser(userID).BloomBuildTaskMaxRetries
 }
@@ -1093,6 +1111,10 @@ func (o *Overrides) BlockIngestionUntil(userID string) time.Time {
 
 func (o *Overrides) BlockIngestionStatusCode(userID string) int {
 	return o.getOverridesForUser(userID).BlockIngestionStatusCode
+}
+
+func (o *Overrides) EnforcedLabels(userID string) []string {
+	return o.getOverridesForUser(userID).EnforcedLabels
 }
 
 func (o *Overrides) ShardAggregations(userID string) []string {
