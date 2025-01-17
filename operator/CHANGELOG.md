@@ -1,5 +1,9 @@
 ## Main
 
+## Release 5.8.17
+
+- [15800](https://github.com/grafana/loki/pull/15800) **xperimental**: Update Loki operator to v3.3.2
+
 ## Release 5.8.15
 
 - [14613](https://github.com/grafana/loki/pull/14613) **xperimental**: fix(operator): Disable log level discovery for OpenShift tenancy modes
