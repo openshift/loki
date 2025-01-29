@@ -56,7 +56,7 @@ func newPageBuilder(opts BuilderOptions) (*pageBuilder, error) {
 		presenceBuffer = bytes.NewBuffer(nil)
 		valuesBuffer   = bytes.NewBuffer(make([]byte, 0, opts.PageSizeHint))
 
-		valuesWriter = newCompressWriter(valuesBuffer, opts.Compression)
+		valuesWriter = newCompressWriter(valuesBuffer, opts.Compression, opts.CompressionOptions)
 	)
 
 	presenceEnc := newBitmapEncoder(presenceBuffer)
@@ -91,7 +91,7 @@ func (b *pageBuilder) Append(value Value) bool {
 	//
 	// We use a rough estimate which will tend to overshoot the page size, making
 	// sure we rarely go over.
-	if sz := b.estimatedSize(); sz > 0 && sz+valueSize(value) > b.opts.PageSizeHint {
+	if sz := b.EstimatedSize(); sz > 0 && sz+valueSize(value) > b.opts.PageSizeHint {
 		return false
 	}
 
@@ -117,7 +117,7 @@ func (b *pageBuilder) AppendNull() bool {
 	//
 	// Here we assume appending a NULL costs one byte, but in reality most NULLs
 	// have no cost depending on the state of our bitmap encoder.
-	if sz := b.estimatedSize(); sz > 0 && sz+1 > b.opts.PageSizeHint {
+	if sz := b.EstimatedSize(); sz > 0 && sz+1 > b.opts.PageSizeHint {
 		return false
 	}
 
@@ -150,9 +150,9 @@ func valueSize(v Value) int {
 	return 0
 }
 
-// estimatedSize returns the estimated uncompressed size of the builder in
+// EstimatedSize returns the estimated uncompressed size of the builder in
 // bytes.
-func (b *pageBuilder) estimatedSize() int {
+func (b *pageBuilder) EstimatedSize() int {
 	// This estimate doesn't account for any values in encoders which haven't
 	// been flushed yet. However, encoder buffers are usually small enough that
 	// we wouldn't massively overshoot our estimate.
@@ -174,12 +174,18 @@ func (b *pageBuilder) Flush() (*MemPage, error) {
 		return nil, fmt.Errorf("no data to flush")
 	}
 
-	// Before we can build the page we need to finish flushing our encoders and writers.
+	// Before we can build the page we need to finish flushing our encoders and
+	// writers.
+	//
+	// We must call [compressWriter.Close] to ensure that Zstd writers write a
+	// proper EOF marker, otherwise synchronous decoding can't be used.
+	// compressWriters can continue to reset and reused after closing, so this is
+	// safe.
 	if err := b.presenceEnc.Flush(); err != nil {
 		return nil, fmt.Errorf("flushing presence encoder: %w", err)
 	} else if err := b.valuesEnc.Flush(); err != nil {
 		return nil, fmt.Errorf("flushing values encoder: %w", err)
-	} else if err := b.valuesWriter.Flush(); err != nil {
+	} else if err := b.valuesWriter.Close(); err != nil {
 		return nil, fmt.Errorf("flushing values writer: %w", err)
 	}
 

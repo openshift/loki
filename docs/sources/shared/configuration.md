@@ -895,6 +895,12 @@ kafka_config:
   # CLI flag: -kafka.max-consumer-lag-at-startup
   [max_consumer_lag_at_startup: <duration> | default = 15s]
 
+dataobj_explorer:
+  # Prefix to use when exploring the bucket. If set, only objects under this
+  # prefix will be visible.
+  # CLI flag: -dataobj-explorer.storage-bucket-prefix
+  [storage_bucket_prefix: <string> | default = "dataobj/"]
+
 # Configuration for 'runtime config' module, responsible for reloading runtime
 # configuration file.
 [runtime_config: <runtime_config>]
@@ -1394,22 +1400,6 @@ client:
   # bloom-gateway-client.grpc
   [grpc_client_config: <grpc_client>]
 
-  results_cache:
-    # The cache_config block configures the cache backend for a specific Loki
-    # component.
-    # The CLI flags prefix for this block configuration is:
-    # bloom-gateway-client.cache
-    [cache: <cache_config>]
-
-    # Use compression in cache. The default is an empty value '', which disables
-    # compression. Supported values are: 'snappy' and ''.
-    # CLI flag: -bloom-gateway-client.cache.compression
-    [compression: <string> | default = ""]
-
-  # Flag to control whether to cache bloom gateway client requests/responses.
-  # CLI flag: -bloom-gateway-client.cache_results
-  [cache_results: <boolean> | default = false]
-
   # Comma separated addresses list in DNS Service Discovery format:
   # https://grafana.com/docs/mimir/latest/configure/about-dns-service-discovery/#supported-discovery-modes
   # CLI flag: -bloom-gateway-client.addresses
@@ -1465,7 +1455,6 @@ The `bos_storage_config` block configures the connection to Baidu Object Storage
 
 The `cache_config` block configures the cache backend for a specific Loki component. The supported CLI flags `<prefix>` used to reference this configuration block are:
 
-- `bloom-gateway-client.cache`
 - `bloom.metas-cache`
 - `frontend`
 - `frontend.index-stats-results-cache`
@@ -3756,7 +3745,7 @@ ruler_remote_write_sigv4_config:
 # CLI flag: -store.retention
 [retention_period: <duration> | default = 0s]
 
-# Per-stream retention to apply, if the retention is enable on the compactor
+# Per-stream retention to apply, if the retention is enabled on the compactor
 # side.
 # Example:
 #  retention_stream:
@@ -3767,7 +3756,7 @@ ruler_remote_write_sigv4_config:
 #  priority: 1
 #  period: 744h
 # Selector is a Prometheus labels matchers that will apply the 'period'
-# retention only if the stream is matching. In case multiple stream are
+# retention only if the stream is matching. In case multiple streams are
 # matching, the highest priority will be picked. If no rule is matched the
 # 'retention_period' is used.
 [retention_stream: <list of StreamRetentions>]
@@ -3828,19 +3817,10 @@ shard_streams:
 # CLI flag: -index-gateway.shard-size
 [index_gateway_shard_size: <int> | default = 0]
 
-# Experimental. The shard size defines how many bloom gateways should be used by
-# a tenant for querying.
-# CLI flag: -bloom-gateway.shard-size
-[bloom_gateway_shard_size: <int> | default = 0]
-
 # Experimental. Whether to use the bloom gateway component in the read path to
 # filter chunks.
 # CLI flag: -bloom-gateway.enable-filtering
 [bloom_gateway_enable_filtering: <boolean> | default = false]
-
-# Experimental. Interval for computing the cache key in the Bloom Gateway.
-# CLI flag: -bloom-gateway.cache-key-interval
-[bloom_gateway_cache_key_interval: <duration> | default = 15m]
 
 # Experimental. Maximum number of builders to use when building blooms. 0 allows
 # unlimited builders.

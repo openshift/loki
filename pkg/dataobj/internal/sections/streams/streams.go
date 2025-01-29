@@ -8,6 +8,7 @@ import (
 	"sort"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/model/labels"
 	"go.uber.org/atomic"
 
@@ -15,6 +16,8 @@ import (
 	"github.com/grafana/loki/v3/pkg/dataobj/internal/encoding"
 	"github.com/grafana/loki/v3/pkg/dataobj/internal/metadata/datasetmd"
 	"github.com/grafana/loki/v3/pkg/dataobj/internal/metadata/streamsmd"
+	"github.com/grafana/loki/v3/pkg/dataobj/internal/streamio"
+	"github.com/grafana/loki/v3/pkg/dataobj/internal/util/sliceclear"
 )
 
 // A Stream is an individual stream within a data object.
@@ -32,9 +35,17 @@ type Stream struct {
 
 // Streams tracks information about streams in a data object.
 type Streams struct {
+	metrics  *Metrics
 	pageSize int
 	lastID   atomic.Int64
 	lookup   map[uint64][]*Stream
+
+	// Size of all label values across all streams; used for
+	// [Streams.EstimatedSize]. Resets on [Streams.Reset].
+	currentLabelsSize int
+
+	globalMinTimestamp time.Time // Minimum timestamp across all streams, used for metrics.
+	globalMaxTimestamp time.Time // Maximum timestamp across all streams, used for metrics.
 
 	// orderedStreams is used for consistently iterating over the list of
 	// streams. It contains streamed added in append order.
@@ -43,8 +54,12 @@ type Streams struct {
 
 // New creates a new Streams section. The pageSize argument specifies how large
 // pages should be.
-func New(pageSize int) *Streams {
+func New(metrics *Metrics, pageSize int) *Streams {
+	if metrics == nil {
+		metrics = NewMetrics()
+	}
 	return &Streams{
+		metrics:  metrics,
 		pageSize: pageSize,
 		lookup:   make(map[uint64][]*Stream),
 	}
@@ -55,8 +70,9 @@ func New(pageSize int) *Streams {
 // calls to Record is used to track the number of rows for a stream.
 //
 // The stream ID of the recorded stream is returned.
-func (s *Streams) Record(streamLabels labels.Labels, ts time.Time) uint64 {
+func (s *Streams) Record(streamLabels labels.Labels, ts time.Time) int64 {
 	ts = ts.UTC()
+	s.observeRecord(ts)
 
 	stream := s.getOrAddStream(streamLabels)
 	if stream.MinTimestamp.IsZero() || ts.Before(stream.MinTimestamp) {
@@ -66,7 +82,50 @@ func (s *Streams) Record(streamLabels labels.Labels, ts time.Time) uint64 {
 		stream.MaxTimestamp = ts
 	}
 	stream.Rows++
-	return uint64(stream.ID)
+	return stream.ID
+}
+
+func (s *Streams) observeRecord(ts time.Time) {
+	s.metrics.recordsTotal.Inc()
+
+	if ts.Before(s.globalMinTimestamp) || s.globalMinTimestamp.IsZero() {
+		s.globalMinTimestamp = ts
+		s.metrics.minTimestamp.Set(float64(ts.Unix()))
+	}
+	if ts.After(s.globalMaxTimestamp) || s.globalMaxTimestamp.IsZero() {
+		s.globalMaxTimestamp = ts
+		s.metrics.maxTimestamp.Set(float64(ts.Unix()))
+	}
+}
+
+// EstimatedSize returns the estimated size of the Streams section in bytes.
+func (s *Streams) EstimatedSize() int {
+	// Since columns are only built when encoding, we can't use
+	// [dataset.ColumnBuilder.EstimatedSize] here.
+	//
+	// Instead, we use a basic heuristic, estimating delta encoding and
+	// compression:
+	//
+	// 1. Assume an ID delta of 1.
+	// 2. Assume a timestamp delta of 1s.
+	// 3. Assume a row count delta of 500.
+	// 4. Assume (conservative) 2x compression ratio of all label values.
+
+	var (
+		idDeltaSize        = streamio.VarintSize(1)
+		timestampDeltaSize = streamio.VarintSize(int64(time.Second))
+		rowDeltaSize       = streamio.VarintSize(500)
+	)
+
+	var sizeEstimate int
+
+	sizeEstimate += len(s.ordered) * idDeltaSize        // ID
+	sizeEstimate += len(s.ordered) * timestampDeltaSize // Min timestamp
+	sizeEstimate += len(s.ordered) * timestampDeltaSize // Max timestamp
+	sizeEstimate += len(s.ordered) * rowDeltaSize       // Rows
+	sizeEstimate += s.currentLabelsSize / 2             // All labels (2x compression ratio)
+
+	return sizeEstimate
 }
 
 func (s *Streams) getOrAddStream(streamLabels labels.Labels) *Stream {
@@ -90,9 +149,14 @@ func (s *Streams) addStream(hash uint64, streamLabels labels.Labels) *Stream {
 	// ordering.
 	sort.Sort(streamLabels)
 
+	for _, lbl := range streamLabels {
+		s.currentLabelsSize += len(lbl.Value)
+	}
+
 	newStream := &Stream{ID: s.lastID.Add(1), Labels: streamLabels}
 	s.lookup[hash] = append(s.lookup[hash], newStream)
 	s.ordered = append(s.ordered, newStream)
+	s.metrics.streamCount.Inc()
 	return newStream
 }
 
@@ -121,6 +185,8 @@ func (s *Streams) StreamID(streamLabels labels.Labels) int64 {
 //
 // [Streams.Reset] is invoked after encoding, even if encoding fails.
 func (s *Streams) EncodeTo(enc *encoding.Encoder) error {
+	timer := prometheus.NewTimer(s.metrics.encodeSeconds)
+	defer timer.ObserveDuration()
 	defer s.Reset()
 
 	// TODO(rfratto): handle one section becoming too large. This can happen when
@@ -268,5 +334,12 @@ func encodeColumn(enc *encoding.StreamsEncoder, columnType streamsmd.ColumnType,
 func (s *Streams) Reset() {
 	s.lastID.Store(0)
 	clear(s.lookup)
-	s.ordered = s.ordered[:0]
+	s.ordered = sliceclear.Clear(s.ordered)
+	s.currentLabelsSize = 0
+	s.globalMinTimestamp = time.Time{}
+	s.globalMaxTimestamp = time.Time{}
+
+	s.metrics.streamCount.Set(0)
+	s.metrics.minTimestamp.Set(0)
+	s.metrics.maxTimestamp.Set(0)
 }
