@@ -1,5 +1,9 @@
 ## Main
 
+## Release 6.0.7
+
+- [16390](https://github.com/grafana/loki/pull/16390) **xperimental**: Enable time-based stream-sharding
+
 ## Release 6.0.6
 
 - [16360](https://github.com/grafana/loki/pull/16360) **xperimental**: Update Loki operator to v3.4.2
