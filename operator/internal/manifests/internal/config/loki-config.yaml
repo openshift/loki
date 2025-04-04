@@ -224,6 +224,7 @@ limits_config:
   shard_streams:
     enabled: true
     desired_rate: {{ . }}MB
+    time_sharding_enabled: true
 {{- end }}
   allow_structured_metadata: {{ .ObjectStorage.AllowStructuredMetadata }}
 {{- with .GossipRing }}
