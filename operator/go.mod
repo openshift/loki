@@ -2,7 +2,7 @@ module github.com/grafana/loki/operator
 
 go 1.23.0
 
-toolchain go1.24.6
+toolchain go1.23.1
 
 require (
 	github.com/ViaQ/logerr/v2 v2.1.0
