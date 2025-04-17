@@ -43,10 +43,6 @@ pkg/dataobj/explorer/ui/.vite/*
 # Submodule added by `act` CLI
 _shared-workflows-dockerhub-login
 
-# Workspaces
-*.work
-*.work.sum
-
 # emacs
 .#*
 
