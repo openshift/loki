@@ -13,14 +13,14 @@ import (
 	"unsafe"
 
 	"github.com/go-kit/log/level"
-	"github.com/pkg/errors"
-	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/common/model"
-
 	"github.com/grafana/dskit/backoff"
 	"github.com/grafana/dskit/kv"
 	"github.com/grafana/dskit/ring"
 	"github.com/grafana/dskit/services"
+	"github.com/pkg/errors"
+	"github.com/prometheus/client_golang/prometheus"
+	"github.com/prometheus/common/model"
+	"github.com/prometheus/prometheus/model/labels"
 
 	"github.com/grafana/loki/v3/pkg/analytics"
 	"github.com/grafana/loki/v3/pkg/compactor/deletion"
@@ -98,7 +98,7 @@ type Config struct {
 
 // RegisterFlags registers flags.
 func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
-	f.StringVar(&cfg.WorkingDirectory, "compactor.working-directory", "", "Directory where files can be downloaded for compaction.")
+	f.StringVar(&cfg.WorkingDirectory, "compactor.working-directory", "/var/loki/compactor", "Directory where files can be downloaded for compaction.")
 	f.DurationVar(&cfg.CompactionInterval, "compactor.compaction-interval", 10*time.Minute, "Interval at which to re-run the compaction operation.")
 	f.DurationVar(&cfg.ApplyRetentionInterval, "compactor.apply-retention-interval", 0, "Interval at which to apply/enforce retention. 0 means run at same interval as compaction. If non-zero, it should always be a multiple of compaction interval.")
 	f.DurationVar(&cfg.RetentionDeleteDelay, "compactor.retention-delete-delay", 2*time.Hour, "Delay after which chunks will be fully deleted during retention.")
@@ -210,7 +210,16 @@ type Limits interface {
 	DefaultLimits() *validation.Limits
 }
 
-func NewCompactor(cfg Config, objectStoreClients map[config.DayTime]client.ObjectClient, deleteStoreClient client.ObjectClient, schemaConfig config.SchemaConfig, limits Limits, r prometheus.Registerer, metricsNamespace string) (*Compactor, error) {
+func NewCompactor(
+	cfg Config,
+	objectStoreClients map[config.DayTime]client.ObjectClient,
+	deleteStoreClient client.ObjectClient,
+	schemaConfig config.SchemaConfig,
+	limits Limits,
+	indexUpdatePropagationMaxDelay time.Duration,
+	r prometheus.Registerer,
+	metricsNamespace string,
+) (*Compactor, error) {
 	retentionEnabledStats.Set("false")
 	if cfg.RetentionEnabled {
 		retentionEnabledStats.Set("true")
@@ -267,7 +276,7 @@ func NewCompactor(cfg Config, objectStoreClients map[config.DayTime]client.Objec
 	compactor.subservicesWatcher = services.NewFailureWatcher()
 	compactor.subservicesWatcher.WatchManager(compactor.subservices)
 
-	if err := compactor.init(objectStoreClients, deleteStoreClient, schemaConfig, limits, r); err != nil {
+	if err := compactor.init(objectStoreClients, deleteStoreClient, schemaConfig, indexUpdatePropagationMaxDelay, limits, r); err != nil {
 		return nil, fmt.Errorf("init compactor: %w", err)
 	}
 
@@ -275,7 +284,14 @@ func NewCompactor(cfg Config, objectStoreClients map[config.DayTime]client.Objec
 	return compactor, nil
 }
 
-func (c *Compactor) init(objectStoreClients map[config.DayTime]client.ObjectClient, deleteStoreClient client.ObjectClient, schemaConfig config.SchemaConfig, limits Limits, r prometheus.Registerer) error {
+func (c *Compactor) init(
+	objectStoreClients map[config.DayTime]client.ObjectClient,
+	deleteStoreClient client.ObjectClient,
+	schemaConfig config.SchemaConfig,
+	indexUpdatePropagationMaxDelay time.Duration,
+	limits Limits,
+	r prometheus.Registerer,
+) error {
 	err := chunk_util.EnsureDirectory(c.cfg.WorkingDirectory)
 	if err != nil {
 		return err
@@ -286,7 +302,7 @@ func (c *Compactor) init(objectStoreClients map[config.DayTime]client.ObjectClie
 			return fmt.Errorf("delete store client not initialised when retention is enabled")
 		}
 
-		if err := c.initDeletes(deleteStoreClient, r, limits); err != nil {
+		if err := c.initDeletes(deleteStoreClient, indexUpdatePropagationMaxDelay, r, limits); err != nil {
 			return fmt.Errorf("failed to init delete store: %w", err)
 		}
 	}
@@ -365,10 +381,16 @@ func (c *Compactor) init(objectStoreClients map[config.DayTime]client.ObjectClie
 	return nil
 }
 
-func (c *Compactor) initDeletes(objectClient client.ObjectClient, r prometheus.Registerer, limits Limits) error {
+func (c *Compactor) initDeletes(objectClient client.ObjectClient, indexUpdatePropagationMaxDelay time.Duration, r prometheus.Registerer, limits Limits) error {
 	deletionWorkDir := filepath.Join(c.cfg.WorkingDirectory, "deletion")
 	indexStorageClient := storage.NewIndexStorageClient(objectClient, c.cfg.DeleteRequestStoreKeyPrefix)
-	store, err := deletion.NewDeleteRequestsStore(deletion.DeleteRequestsStoreDBType(c.cfg.DeleteRequestStoreDBType), deletionWorkDir, indexStorageClient, deletion.DeleteRequestsStoreDBType(c.cfg.BackupDeleteRequestStoreDBType))
+	store, err := deletion.NewDeleteRequestsStore(
+		deletion.DeleteRequestsStoreDBType(c.cfg.DeleteRequestStoreDBType),
+		deletionWorkDir,
+		indexStorageClient,
+		deletion.DeleteRequestsStoreDBType(c.cfg.BackupDeleteRequestStoreDBType),
+		indexUpdatePropagationMaxDelay,
+	)
 	if err != nil {
 		return err
 	}
@@ -384,13 +406,10 @@ func (c *Compactor) initDeletes(objectClient client.ObjectClient, r prometheus.R
 
 	c.DeleteRequestsGRPCHandler = deletion.NewGRPCRequestHandler(c.deleteRequestsStore, limits)
 
-	c.deleteRequestsManager = deletion.NewDeleteRequestsManager(
-		c.deleteRequestsStore,
-		c.cfg.DeleteRequestCancelPeriod,
-		c.cfg.DeleteBatchSize,
-		limits,
-		r,
-	)
+	c.deleteRequestsManager, err = deletion.NewDeleteRequestsManager(deletionWorkDir, c.deleteRequestsStore, c.cfg.DeleteRequestCancelPeriod, c.cfg.DeleteBatchSize, limits, r)
+	if err != nil {
+		return err
+	}
 
 	c.expirationChecker = newExpirationChecker(retention.NewExpirationChecker(limits), c.deleteRequestsManager)
 	return nil
@@ -831,12 +850,12 @@ func newExpirationChecker(retentionExpiryChecker, deletionExpiryChecker retentio
 	return &expirationChecker{retentionExpiryChecker, deletionExpiryChecker}
 }
 
-func (e *expirationChecker) Expired(ref retention.ChunkEntry, now model.Time) (bool, filter.Func) {
-	if expired, nonDeletedIntervals := e.retentionExpiryChecker.Expired(ref, now); expired {
+func (e *expirationChecker) Expired(userID []byte, chk retention.Chunk, lbls labels.Labels, seriesID []byte, tableName string, now model.Time) (bool, filter.Func) {
+	if expired, nonDeletedIntervals := e.retentionExpiryChecker.Expired(userID, chk, lbls, seriesID, tableName, now); expired {
 		return expired, nonDeletedIntervals
 	}
 
-	return e.deletionExpiryChecker.Expired(ref, now)
+	return e.deletionExpiryChecker.Expired(userID, chk, lbls, seriesID, tableName, now)
 }
 
 func (e *expirationChecker) MarkPhaseStarted() {
@@ -863,8 +882,20 @@ func (e *expirationChecker) IntervalMayHaveExpiredChunks(interval model.Interval
 	return e.retentionExpiryChecker.IntervalMayHaveExpiredChunks(interval, userID) || e.deletionExpiryChecker.IntervalMayHaveExpiredChunks(interval, userID)
 }
 
-func (e *expirationChecker) DropFromIndex(ref retention.ChunkEntry, tableEndTime model.Time, now model.Time) bool {
-	return e.retentionExpiryChecker.DropFromIndex(ref, tableEndTime, now) || e.deletionExpiryChecker.DropFromIndex(ref, tableEndTime, now)
+func (e *expirationChecker) DropFromIndex(userID []byte, chk retention.Chunk, labels labels.Labels, tableEndTime model.Time, now model.Time) bool {
+	return e.retentionExpiryChecker.DropFromIndex(userID, chk, labels, tableEndTime, now) || e.deletionExpiryChecker.DropFromIndex(userID, chk, labels, tableEndTime, now)
+}
+
+func (e *expirationChecker) CanSkipSeries(userID []byte, lbls labels.Labels, seriesID []byte, seriesStart model.Time, tableName string, now model.Time) bool {
+	return e.retentionExpiryChecker.CanSkipSeries(userID, lbls, seriesID, seriesStart, tableName, now) && e.deletionExpiryChecker.CanSkipSeries(userID, lbls, seriesID, seriesStart, tableName, now)
+}
+
+func (e *expirationChecker) MarkSeriesAsProcessed(userID, seriesID []byte, lbls labels.Labels, tableName string) error {
+	if err := e.retentionExpiryChecker.MarkSeriesAsProcessed(userID, seriesID, lbls, tableName); err != nil {
+		return err
+	}
+
+	return e.deletionExpiryChecker.MarkSeriesAsProcessed(userID, seriesID, lbls, tableName)
 }
 
 func (c *Compactor) OnRingInstanceRegister(_ *ring.BasicLifecycler, ringDesc ring.Desc, instanceExists bool, _ string, instanceDesc ring.InstanceDesc) (ring.InstanceState, ring.Tokens) {

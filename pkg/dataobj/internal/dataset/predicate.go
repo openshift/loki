@@ -15,11 +15,25 @@ type (
 	// included if either the Left or Right Predicate are true.
 	OrPredicate struct{ Left, Right Predicate }
 
+	// A NotePredicate is a [Predicate] which asserts that a row may only be
+	// included if the inner Predicate is false.
+	NotPredicate struct{ Inner Predicate }
+
+	// FalsePredicate is a [Predicate] which always returns false.
+	FalsePredicate struct{}
+
 	// An EqualPredicate is a [Predicate] which asserts that a row may only be
 	// included if the Value of the Column is equal to the Value.
 	EqualPredicate struct {
 		Column Column // Column to check.
 		Value  Value  // Value to check equality for.
+	}
+
+	// An InPredicate is a [Predicate] which asserts that a row may only be
+	// included if the Value of the Column is present in the provided Values.
+	InPredicate struct {
+		Column Column  // Column to check.
+		Values []Value // Values to check for inclusion.
 	}
 
 	// A GreaterThanPredicate is a [Predicate] which asserts that a row may only
@@ -55,7 +69,10 @@ type (
 
 func (AndPredicate) isPredicate()         {}
 func (OrPredicate) isPredicate()          {}
+func (NotPredicate) isPredicate()         {}
+func (FalsePredicate) isPredicate()       {}
 func (EqualPredicate) isPredicate()       {}
+func (InPredicate) isPredicate()          {}
 func (GreaterThanPredicate) isPredicate() {}
 func (LessThanPredicate) isPredicate()    {}
 func (FuncPredicate) isPredicate()        {}
@@ -78,7 +95,12 @@ func WalkPredicate(p Predicate, fn func(p Predicate) bool) {
 		WalkPredicate(p.Left, fn)
 		WalkPredicate(p.Right, fn)
 
+	case NotPredicate:
+		WalkPredicate(p.Inner, fn)
+
+	case FalsePredicate: // No children.
 	case EqualPredicate: // No children.
+	case InPredicate: // No children.
 	case GreaterThanPredicate: // No children.
 	case LessThanPredicate: // No children.
 	case FuncPredicate: // No children.
