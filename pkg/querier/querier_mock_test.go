@@ -21,7 +21,7 @@ import (
 	"google.golang.org/grpc/health/grpc_health_v1"
 	grpc_metadata "google.golang.org/grpc/metadata"
 
-	"github.com/grafana/loki/v3/pkg/compactor/deletion"
+	"github.com/grafana/loki/v3/pkg/compactor/deletion/deletionproto"
 	"github.com/grafana/loki/v3/pkg/distributor/clientpool"
 	"github.com/grafana/loki/v3/pkg/ingester/client"
 	"github.com/grafana/loki/v3/pkg/iter"
@@ -521,6 +521,10 @@ func (r *readRingMock) GetWithOptions(_ uint32, _ ring.Operation, _ ...ring.Opti
 	return r.replicationSet, nil
 }
 
+func (r *readRingMock) GetSubringForOperationStates(_ ring.Operation) ring.ReadRing {
+	return r
+}
+
 func mockReadRingWithOneActiveIngester() *readRingMock {
 	return newReadRingMock([]ring.InstanceDesc{
 		{Addr: "test", Timestamp: time.Now().UnixNano(), State: ring.ACTIVE, Tokens: []uint32{1, 2, 3}},
@@ -603,7 +607,7 @@ func mockLogfmtStreamWithLabels(_ int, quantity int, lbls string) logproto.Strea
 		streamLabels = labels.EmptyLabels()
 	}
 
-	lblBuilder := log.NewBaseLabelsBuilder().ForLabels(streamLabels, streamLabels.Hash())
+	lblBuilder := log.NewBaseLabelsBuilder().ForLabels(streamLabels, labels.StableHash(streamLabels))
 	logFmtParser := log.NewLogfmtParser(false, false)
 
 	// used for detected fields queries which are always BACKWARD
@@ -663,7 +667,7 @@ func mockLogfmtStreamWithLabelsAndStructuredMetadata(
 		streamLabels = labels.EmptyLabels()
 	}
 
-	lblBuilder := log.NewBaseLabelsBuilder().ForLabels(streamLabels, streamLabels.Hash())
+	lblBuilder := log.NewBaseLabelsBuilder().ForLabels(streamLabels, labels.StableHash(streamLabels))
 	logFmtParser := log.NewLogfmtParser(false, false)
 
 	for i := quantity; i > 0; i-- {
@@ -833,10 +837,10 @@ func newMockEngineWithPatterns(patterns []string) logql.Engine {
 	matrix := promql.Matrix{}
 	for _, pattern := range patterns {
 		matrix = append(matrix, promql.Series{
-			Metric: labels.Labels{
-				{Name: "service_name", Value: "test-service"},
-				{Name: "decoded_pattern", Value: pattern},
-			},
+			Metric: labels.New(
+				labels.Label{Name: "service_name", Value: "test-service"},
+				labels.Label{Name: "decoded_pattern", Value: pattern},
+			),
 			Floats: []promql.FPoint{
 				{T: time.Now().UnixMilli(), F: 100},
 			},
@@ -861,10 +865,10 @@ func newMockEngineWithPatternsAndTimestamps(patternSamples []patternSample) logq
 	matrix := promql.Matrix{}
 	for _, ps := range patternSamples {
 		matrix = append(matrix, promql.Series{
-			Metric: labels.Labels{
-				{Name: "service_name", Value: "test-service"},
-				{Name: "decoded_pattern", Value: ps.pattern},
-			},
+			Metric: labels.New(
+				labels.Label{Name: "service_name", Value: "test-service"},
+				labels.Label{Name: "decoded_pattern", Value: ps.pattern},
+			),
 			Floats: []promql.FPoint{
 				{T: ps.timestamp, F: float64(ps.value)},
 			},
@@ -898,10 +902,10 @@ func (tl mockTenantLimits) AllByUserID() map[string]*validation.Limits {
 
 type mockDeleteGettter struct {
 	user    string
-	results []deletion.DeleteRequest
+	results []deletionproto.DeleteRequest
 }
 
-func (d *mockDeleteGettter) GetAllDeleteRequestsForUser(_ context.Context, userID string) ([]deletion.DeleteRequest, error) {
+func (d *mockDeleteGettter) GetAllDeleteRequestsForUser(_ context.Context, userID string) ([]deletionproto.DeleteRequest, error) {
 	d.user = userID
 	return d.results, nil
 }

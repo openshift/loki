@@ -232,7 +232,7 @@ func buildS3Client(cfg S3Config, hedgingCfg hedging.Config, hedging bool) (*s3.S
 	}
 
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: cfg.HTTPConfig.InsecureSkipVerify, //#nosec G402 -- User has explicitly requested to disable TLS
+		InsecureSkipVerify: cfg.HTTPConfig.InsecureSkipVerify, //#nosec G402 -- User has explicitly requested to disable TLS -- nosemgrep: tls-with-insecure-cipher
 	}
 
 	if cfg.HTTPConfig.CAFile != "" {
@@ -295,7 +295,7 @@ func buckets(cfg S3Config) ([]string, error) {
 	// bucketnames
 	var bucketNames []string
 	if cfg.S3.URL != nil {
-		bucketNames = []string{strings.TrimPrefix(cfg.S3.URL.Path, "/")}
+		bucketNames = []string{strings.TrimPrefix(cfg.S3.Path, "/")}
 	}
 
 	if cfg.BucketNames != "" {

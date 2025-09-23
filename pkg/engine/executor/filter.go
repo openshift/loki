@@ -1,6 +1,7 @@
 package executor
 
 import (
+	"context"
 	"fmt"
 
 	"github.com/apache/arrow-go/v18/arrow"
@@ -11,15 +12,10 @@ import (
 )
 
 func NewFilterPipeline(filter *physical.Filter, input Pipeline, evaluator expressionEvaluator) *GenericPipeline {
-	return newGenericPipeline(Local, func(inputs []Pipeline) state {
+	return newGenericPipeline(Local, func(ctx context.Context, inputs []Pipeline) state {
 		// Pull the next item from the input pipeline
 		input := inputs[0]
-		err := input.Read()
-		if err != nil {
-			return failureState(err)
-		}
-
-		batch, err := input.Value()
+		batch, err := input.Read(ctx)
 		if err != nil {
 			return failureState(err)
 		}
@@ -86,6 +82,7 @@ func filterBatch(batch arrow.Record, include func(int) bool) arrow.Record {
 	additions := make([]func(int), len(fields))
 
 	for i, field := range fields {
+
 		switch field.Type.ID() {
 		case arrow.BOOL:
 			builder := array.NewBooleanBuilder(mem)
@@ -127,6 +124,14 @@ func filterBatch(batch arrow.Record, include func(int) bool) arrow.Record {
 				builder.Append(src.Value(offset))
 			}
 
+		case arrow.TIMESTAMP:
+			builder := array.NewTimestampBuilder(mem, &arrow.TimestampType{Unit: arrow.Nanosecond, TimeZone: "UTC"})
+			builders[i] = builder
+			additions[i] = func(offset int) {
+				src := batch.Column(i).(*array.Timestamp)
+				builder.Append(src.Value(offset))
+			}
+
 		default:
 			panic(fmt.Sprintf("unimplemented type in filterBatch: %s", field.Type.Name()))
 		}
@@ -134,12 +139,19 @@ func filterBatch(batch arrow.Record, include func(int) bool) arrow.Record {
 
 	var ct int64
 	for i := 0; i < int(batch.NumRows()); i++ {
-		if include(i) {
-			for _, add := range additions {
-				add(i)
-			}
-			ct++
+		if !include(i) {
+			continue
 		}
+
+		for col, add := range additions {
+			if batch.Column(col).IsNull(i) {
+				builders[col].AppendNull()
+				continue
+			}
+
+			add(i)
+		}
+		ct++
 	}
 
 	schema := arrow.NewSchema(fields, nil)

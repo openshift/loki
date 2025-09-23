@@ -43,6 +43,10 @@ func (b *ssaBuilder) process(value Value) (Value, error) {
 		return b.processSortPlan(value)
 	case *RangeAggregation:
 		return b.processRangeAggregate(value)
+	case *VectorAggregation:
+		return b.processVectorAggregation(value)
+	case *Parse:
+		return b.processParsePlan(value)
 
 	case *UnaryOp:
 		return b.processUnaryOp(value)
@@ -63,8 +67,17 @@ func (b *ssaBuilder) processMakeTablePlan(plan *MakeTable) (Value, error) {
 		return nil, err
 	}
 
-	plan.id = fmt.Sprintf("%%%d", b.getID())
-	b.instructions = append(b.instructions, plan)
+	for _, pred := range plan.Predicates {
+		if _, err := b.process(pred); err != nil {
+			return nil, err
+		}
+	}
+
+	// Only append the first time we see this.
+	if plan.id == "" {
+		plan.id = fmt.Sprintf("%%%d", b.getID())
+		b.instructions = append(b.instructions, plan)
+	}
 	return plan, nil
 }
 
@@ -76,9 +89,11 @@ func (b *ssaBuilder) processSelectPlan(plan *Select) (Value, error) {
 		return nil, err
 	}
 
-	// Create a node for the select
-	plan.id = fmt.Sprintf("%%%d", b.getID())
-	b.instructions = append(b.instructions, plan)
+	// Only append the first time we see this.
+	if plan.id == "" {
+		plan.id = fmt.Sprintf("%%%d", b.getID())
+		b.instructions = append(b.instructions, plan)
+	}
 	return plan, nil
 }
 
@@ -87,8 +102,11 @@ func (b *ssaBuilder) processLimitPlan(plan *Limit) (Value, error) {
 		return nil, err
 	}
 
-	plan.id = fmt.Sprintf("%%%d", b.getID())
-	b.instructions = append(b.instructions, plan)
+	// Only append the first time we see this.
+	if plan.id == "" {
+		plan.id = fmt.Sprintf("%%%d", b.getID())
+		b.instructions = append(b.instructions, plan)
+	}
 	return plan, nil
 }
 
@@ -97,8 +115,24 @@ func (b *ssaBuilder) processSortPlan(plan *Sort) (Value, error) {
 		return nil, err
 	}
 
-	plan.id = fmt.Sprintf("%%%d", b.getID())
-	b.instructions = append(b.instructions, plan)
+	// Only append the first time we see this.
+	if plan.id == "" {
+		plan.id = fmt.Sprintf("%%%d", b.getID())
+		b.instructions = append(b.instructions, plan)
+	}
+	return plan, nil
+}
+
+func (b *ssaBuilder) processParsePlan(plan *Parse) (Value, error) {
+	if _, err := b.process(plan.Table); err != nil {
+		return nil, err
+	}
+
+	// Only append the first time we see this.
+	if plan.id == "" {
+		plan.id = fmt.Sprintf("%%%d", b.getID())
+		b.instructions = append(b.instructions, plan)
+	}
 	return plan, nil
 }
 
@@ -107,9 +141,11 @@ func (b *ssaBuilder) processUnaryOp(value *UnaryOp) (Value, error) {
 		return nil, err
 	}
 
-	// Create a node for the unary operation
-	value.id = fmt.Sprintf("%%%d", b.getID())
-	b.instructions = append(b.instructions, value)
+	// Only append the first time we see this.
+	if value.id == "" {
+		value.id = fmt.Sprintf("%%%d", b.getID())
+		b.instructions = append(b.instructions, value)
+	}
 	return value, nil
 }
 
@@ -118,8 +154,24 @@ func (b *ssaBuilder) processRangeAggregate(plan *RangeAggregation) (Value, error
 		return nil, err
 	}
 
-	plan.id = fmt.Sprintf("%%%d", b.getID())
-	b.instructions = append(b.instructions, plan)
+	// Only append the first time we see this.
+	if plan.id == "" {
+		plan.id = fmt.Sprintf("%%%d", b.getID())
+		b.instructions = append(b.instructions, plan)
+	}
+	return plan, nil
+}
+
+func (b *ssaBuilder) processVectorAggregation(plan *VectorAggregation) (Value, error) {
+	if _, err := b.process(plan.Table); err != nil {
+		return nil, err
+	}
+
+	// Only append the first time we see this.
+	if plan.id == "" {
+		plan.id = fmt.Sprintf("%%%d", b.getID())
+		b.instructions = append(b.instructions, plan)
+	}
 	return plan, nil
 }
 
@@ -130,8 +182,11 @@ func (b *ssaBuilder) processBinOp(expr *BinOp) (Value, error) {
 		return nil, err
 	}
 
-	expr.id = fmt.Sprintf("%%%d", b.getID())
-	b.instructions = append(b.instructions, expr)
+	// Only append the first time we see this.
+	if expr.id == "" {
+		expr.id = fmt.Sprintf("%%%d", b.getID())
+		b.instructions = append(b.instructions, expr)
+	}
 	return expr, nil
 }
 
