@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 
-	"github.com/apache/arrow-go/v18/arrow/memory"
 	"github.com/go-kit/log"
 	"github.com/grafana/dskit/user"
 	"github.com/thanos-io/objstore"
@@ -26,6 +25,11 @@ type Config struct {
 	Bucket    objstore.Bucket
 
 	MergePrefetchCount int
+
+	// GetExternalInputs is an optional function called for each node in the
+	// plan. If GetExternalInputs returns a non-nil slice of Pipelines, they
+	// will be used as inputs to the pipeline of node.
+	GetExternalInputs func(ctx context.Context, node physical.Node) []Pipeline
 }
 
 func Run(ctx context.Context, cfg Config, plan *physical.Plan, logger log.Logger) Pipeline {
@@ -35,6 +39,8 @@ func Run(ctx context.Context, cfg Config, plan *physical.Plan, logger log.Logger
 		mergePrefetchCount: cfg.MergePrefetchCount,
 		bucket:             cfg.Bucket,
 		logger:             logger,
+		evaluator:          newExpressionEvaluator(),
+		getExternalInputs:  cfg.GetExternalInputs,
 	}
 	if plan == nil {
 		return errorPipeline(ctx, errors.New("plan is nil"))
@@ -55,6 +61,8 @@ type Context struct {
 	evaluator expressionEvaluator
 	bucket    objstore.Bucket
 
+	getExternalInputs func(ctx context.Context, node physical.Node) []Pipeline
+
 	mergePrefetchCount int
 }
 
@@ -63,6 +71,10 @@ func (c *Context) execute(ctx context.Context, node physical.Node) Pipeline {
 	inputs := make([]Pipeline, 0, len(children))
 	for _, child := range children {
 		inputs = append(inputs, c.execute(ctx, child))
+	}
+
+	if c.getExternalInputs != nil {
+		inputs = append(inputs, c.getExternalInputs(ctx, node)...)
 	}
 
 	switch n := node.(type) {
@@ -89,8 +101,6 @@ func (c *Context) execute(ctx context.Context, node physical.Node) Pipeline {
 		return tracePipeline("physical.RangeAggregation", c.executeRangeAggregation(ctx, n, inputs))
 	case *physical.VectorAggregation:
 		return tracePipeline("physical.VectorAggregation", c.executeVectorAggregation(ctx, n, inputs))
-	case *physical.ParseNode:
-		return tracePipeline("physical.ParseNode", c.executeParse(ctx, n, inputs))
 	case *physical.ColumnCompat:
 		return tracePipeline("physical.ColumnCompat", c.executeColumnCompat(ctx, n, inputs))
 	case *physical.Parallelize:
@@ -196,9 +206,6 @@ func (c *Context) executeDataObjScan(ctx context.Context, node *physical.DataObj
 		Predicates:  predicates,
 		Projections: node.Projections,
 
-		// TODO(rfratto): pass custom allocator
-		Allocator: memory.DefaultAllocator,
-
 		BatchSize: c.batchSize,
 	}, log.With(c.logger, "location", string(node.Location), "section", node.Section))
 
@@ -279,10 +286,7 @@ func (c *Context) executeFilter(ctx context.Context, filter *physical.Filter, in
 		return errorPipeline(ctx, fmt.Errorf("filter expects exactly one input, got %d", len(inputs)))
 	}
 
-	// Use memory allocator from context or default
-	allocator := memory.DefaultAllocator
-
-	return NewFilterPipeline(filter, inputs[0], c.evaluator, allocator)
+	return NewFilterPipeline(filter, inputs[0], c.evaluator)
 }
 
 func (c *Context) executeProjection(ctx context.Context, proj *physical.Projection, inputs []Pipeline) Pipeline {
@@ -359,21 +363,6 @@ func (c *Context) executeVectorAggregation(ctx context.Context, plan *physical.V
 	}
 
 	return pipeline
-}
-
-func (c *Context) executeParse(ctx context.Context, parse *physical.ParseNode, inputs []Pipeline) Pipeline {
-	if len(inputs) == 0 {
-		return emptyPipeline()
-	}
-
-	if len(inputs) > 1 {
-		return errorPipeline(ctx, fmt.Errorf("parse expects exactly one input, got %d", len(inputs)))
-	}
-
-	// Use memory allocator from context or default
-	allocator := memory.DefaultAllocator
-
-	return NewParsePipeline(parse, inputs[0], allocator)
 }
 
 func (c *Context) executeColumnCompat(ctx context.Context, compat *physical.ColumnCompat, inputs []Pipeline) Pipeline {
