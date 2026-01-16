@@ -65,7 +65,7 @@ var (
 
 // Similar to store_test.go -- we need a populated dataobj/builder/metastore to test labels and values
 type testDataBuilder struct {
-	t      *testing.T
+	t      testing.TB
 	bucket objstore.Bucket
 
 	builder  *logsobj.Builder
@@ -86,37 +86,6 @@ func (b *testDataBuilder) addStreamAndFlush(tenant string, stream logproto.Strea
 	require.NoError(b.t, err)
 
 	require.NoError(b.t, b.meta.WriteEntry(context.Background(), path, timeRanges))
-}
-
-func TestStreamIDs(t *testing.T) {
-	t.Run("not matching streams", func(t *testing.T) {
-		queryMetastore(t, tenantID, func(ctx context.Context, start, end time.Time, mstore Metastore) {
-			matchers := []*labels.Matcher{
-				labels.MustNewMatcher(labels.MatchEqual, "foo", "bar"),
-			}
-			paths, streamIDs, sections, err := mstore.StreamIDs(ctx, start, end, matchers...)
-			require.NoError(t, err)
-			require.Len(t, paths, 0)
-			require.Len(t, streamIDs, 0)
-			require.Len(t, sections, 0)
-		})
-	})
-
-	t.Run("matching streams", func(t *testing.T) {
-		queryMetastore(t, tenantID, func(ctx context.Context, start, end time.Time, mstore Metastore) {
-			matchers := []*labels.Matcher{
-				labels.MustNewMatcher(labels.MatchEqual, "app", "foo"),
-				labels.MustNewMatcher(labels.MatchEqual, "env", "prod"),
-			}
-			paths, streamIDs, sections, err := mstore.StreamIDs(ctx, start, end, matchers...)
-			require.NoError(t, err)
-			require.Len(t, paths, 1)
-			require.Len(t, streamIDs, 1)
-			require.Len(t, sections, 1)
-			require.Equal(t, []int64{1}, streamIDs[0])
-			require.Equal(t, 1, sections[0])
-		})
-	})
 }
 
 func TestLabels(t *testing.T) {
@@ -247,7 +216,7 @@ func TestValuesEmptyMatcher(t *testing.T) {
 func TestSectionsForStreamMatchers(t *testing.T) {
 	ctx := user.InjectOrgID(context.Background(), tenantID)
 
-	builder, err := indexobj.NewBuilder(indexobj.BuilderConfig{
+	builder, err := indexobj.NewBuilder(logsobj.BuilderBaseConfig{
 		TargetPageSize:          1024 * 1024,
 		TargetObjectSize:        10 * 1024 * 1024,
 		TargetSectionSize:       128,
@@ -394,7 +363,7 @@ func TestSectionsForStreamMatchers(t *testing.T) {
 func TestSectionsForPredicateMatchers(t *testing.T) {
 	ctx := user.InjectOrgID(context.Background(), tenantID)
 
-	builder, err := indexobj.NewBuilder(indexobj.BuilderConfig{
+	builder, err := indexobj.NewBuilder(logsobj.BuilderBaseConfig{
 		TargetPageSize:          1024 * 1024,
 		TargetObjectSize:        10 * 1024 * 1024,
 		TargetSectionSize:       128,
@@ -530,15 +499,17 @@ func queryMetastore(t *testing.T, tenant string, mfunc func(context.Context, tim
 	mfunc(ctx, start, end, mstore)
 }
 
-func newTestDataBuilder(t *testing.T) *testDataBuilder {
+func newTestDataBuilder(t testing.TB) *testDataBuilder {
 	bucket := objstore.NewInMemBucket()
 
 	builder, err := logsobj.NewBuilder(logsobj.BuilderConfig{
-		TargetPageSize:          1024 * 1024,      // 1MB
-		TargetObjectSize:        10 * 1024 * 1024, // 10MB
-		TargetSectionSize:       1024 * 1024,      // 1MB
-		BufferSize:              1024 * 1024,      // 1MB
-		SectionStripeMergeLimit: 2,
+		BuilderBaseConfig: logsobj.BuilderBaseConfig{
+			TargetPageSize:          1024 * 1024,      // 1MB
+			TargetObjectSize:        10 * 1024 * 1024, // 10MB
+			TargetSectionSize:       1024 * 1024,      // 1MB
+			BufferSize:              1024 * 1024,      // 1MB
+			SectionStripeMergeLimit: 2,
+		},
 	}, nil)
 	require.NoError(t, err)
 

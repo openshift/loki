@@ -12,10 +12,10 @@ import (
 
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	"github.com/grafana/dskit/flagext"
 	"github.com/grafana/dskit/user"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/thanos-io/objstore"
+	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/trace"
@@ -24,6 +24,7 @@ import (
 	"github.com/grafana/loki/v3/pkg/engine/internal/executor"
 	"github.com/grafana/loki/v3/pkg/engine/internal/planner/logical"
 	"github.com/grafana/loki/v3/pkg/engine/internal/planner/physical"
+	"github.com/grafana/loki/v3/pkg/engine/internal/util/dag"
 	"github.com/grafana/loki/v3/pkg/engine/internal/workflow"
 	"github.com/grafana/loki/v3/pkg/logql"
 	"github.com/grafana/loki/v3/pkg/logql/syntax"
@@ -33,6 +34,7 @@ import (
 	"github.com/grafana/loki/v3/pkg/util/httpreq"
 	util_log "github.com/grafana/loki/v3/pkg/util/log"
 	"github.com/grafana/loki/v3/pkg/util/rangeio"
+	"github.com/grafana/loki/v3/pkg/xcap"
 )
 
 var (
@@ -45,11 +47,10 @@ var (
 	ErrSchedulingFailed = errors.New("failed to schedule query")
 )
 
+var tracer = otel.Tracer("pkg/engine")
+
 // ExecutorConfig configures engine execution.
 type ExecutorConfig struct {
-	DataobjStorageLag   time.Duration `yaml:"dataobj_storage_lag" category:"experimental"`
-	DataobjStorageStart flagext.Time  `yaml:"dataobj_storage_start" category:"experimental"`
-
 	// Batch size of the v2 execution engine.
 	BatchSize int `yaml:"batch_size" category:"experimental"`
 
@@ -65,12 +66,6 @@ func (cfg *ExecutorConfig) RegisterFlagsWithPrefix(prefix string, f *flag.FlagSe
 	f.IntVar(&cfg.MergePrefetchCount, prefix+"merge-prefetch-count", 0, "Experimental: The number of inputs that are prefetched simultaneously by any Merge node. A value of 0 means that only the currently processed input is prefetched, 1 means that only the next input is prefetched, and so on. A negative value means that all inputs are be prefetched in parallel.")
 	cfg.RangeConfig.RegisterFlags(prefix+"range-reads.", f)
 
-	f.DurationVar(&cfg.DataobjStorageLag, prefix+"dataobj-storage-lag", 1*time.Hour, "Amount of time until data objects are available.")
-	f.Var(&cfg.DataobjStorageStart, prefix+"dataobj-storage-start", "Initial date when data objects became available. Format YYYY-MM-DD. If not set, assume data objects are always available no matter how far back.")
-}
-
-func (cfg *ExecutorConfig) ValidQueryRange() (time.Time, time.Time) {
-	return time.Time(cfg.DataobjStorageStart).UTC(), time.Now().UTC().Add(-cfg.DataobjStorageLag)
 }
 
 // Params holds parameters for constructing a new [Engine].
@@ -154,9 +149,10 @@ func (e *Engine) Execute(ctx context.Context, params logql.Params) (logqlmodel.R
 	// This pain point will eventually go away as remaining usages of
 	// [logql.Engine] disappear.
 
+	ctx, capture := xcap.NewCapture(ctx, nil)
 	startTime := time.Now()
 
-	ctx, span := tracer.Start(ctx, "Engine.Execute", trace.WithAttributes(
+	ctx, span := tracer.Start(ctx, "Engine.Engine", trace.WithAttributes(
 		attribute.String("type", string(logql.GetRangeType(params))),
 		attribute.String("query", params.QueryString()),
 		attribute.Stringer("start", params.Start()),
@@ -169,7 +165,10 @@ func (e *Engine) Execute(ctx context.Context, params logql.Params) (logqlmodel.R
 
 	ctx = e.buildContext(ctx)
 	logger := util_log.WithContext(ctx, e.logger)
-	logger = log.With(logger, "engine", "v2", "query", params.QueryString(), "shard", strings.Join(params.Shards(), ","))
+	logger = log.With(logger, "engine", "v2")
+	logger = injectQueryTags(ctx, logger)
+
+	level.Info(logger).Log("msg", "starting query", "query", params.QueryString(), "shard", strings.Join(params.Shards(), ","))
 
 	logicalPlan, durLogicalPlanning, err := e.buildLogicalPlan(ctx, logger, params)
 	if err != nil {
@@ -191,6 +190,7 @@ func (e *Engine) Execute(ctx context.Context, params logql.Params) (logqlmodel.R
 		span.SetStatus(codes.Error, "failed to create execution plan")
 		return logqlmodel.Result{}, ErrPlanningFailed
 	}
+	defer wf.Close()
 
 	pipeline, err := wf.Run(ctx)
 	if err != nil {
@@ -219,6 +219,10 @@ func (e *Engine) Execute(ctx context.Context, params logql.Params) (logqlmodel.R
 		"duration_full", durFull,
 	)
 
+	if err := exportCapture(ctx, capture, physicalPlan, logger); err != nil {
+		level.Error(logger).Log("msg", "failed to export capture as trace", "err", err)
+	}
+
 	queueTime, _ := ctx.Value(httpreq.QueryQueueTimeHTTPHeader).(time.Duration)
 	statsCtx := stats.FromContext(ctx)
 	statsCtx.AddQuerierExecTime(durFull)
@@ -244,6 +248,17 @@ func (e *Engine) buildContext(ctx context.Context) context.Context {
 	statsContext.SetQueryUsedV2Engine()
 	metadataContext.AddWarning("Query was executed using the new experimental query engine and dataobj storage.")
 	return ctx
+}
+
+// injectQueryTags adds query tags as key-value pairs from the context into the
+// given logger, if they have been defined via [httpreq.InjectQueryTags].
+// Otherwise, the original logger is returned unmodified.
+func injectQueryTags(ctx context.Context, logger log.Logger) log.Logger {
+	tags := httpreq.ExtractQueryTagsFromContext(ctx)
+	if len(tags) == 0 {
+		return logger
+	}
+	return log.With(logger, httpreq.TagsToKeyValues(tags)...)
 }
 
 // buildLogicalPlan builds a logical plan from the given params.
@@ -326,6 +341,9 @@ func (e *Engine) buildWorkflow(ctx context.Context, logger log.Logger, physicalP
 	opts := workflow.Options{
 		MaxRunningScanTasks:  e.limits.MaxScanTaskParallelism(tenantID),
 		MaxRunningOtherTasks: 0,
+
+		DebugTasks:   e.limits.DebugEngineTasks(tenantID),
+		DebugStreams: e.limits.DebugEngineStreams(tenantID),
 	}
 	wf, err := workflow.New(opts, logger, tenantID, e.scheduler.inner, physicalPlan)
 	if err != nil {
@@ -401,4 +419,45 @@ func (e *Engine) collectResult(ctx context.Context, logger log.Logger, params lo
 		attribute.Stringer("duration", duration),
 	))
 	return builder, duration, nil
+}
+
+func exportCapture(ctx context.Context, capture *xcap.Capture, plan *physical.Plan, logger log.Logger) error {
+	if capture == nil {
+		return nil
+	}
+
+	// nodeID to parentNodeID mapping.
+	idToParentID := make(map[string]string, plan.Len())
+	for _, root := range plan.Roots() {
+		if err := plan.DFSWalk(root, func(n physical.Node) error {
+			parents := plan.Graph().Parents(n)
+			if len(parents) > 0 {
+				// TODO: This is assuming a single parent which is not always true.
+				// Fix this when we have plans with multiple parents.
+
+				if parents[0].Type() == physical.NodeTypeParallelize {
+					// Skip Parallelize nodes as they are not execution nodes.
+					pp := plan.Graph().Parents(parents[0])
+					if len(pp) > 0 {
+						parents = pp
+					} else {
+						return nil
+					}
+				}
+
+				idToParentID[n.ID().String()] = parents[0].ID().String()
+			}
+			return nil
+		}, dag.PreOrderWalk); err != nil {
+			return err
+		}
+	}
+
+	// Link region by using node_id for finding parent regions.
+	capture.LinkRegions("node_id", func(nodeID string) (string, bool) {
+		parentID, ok := idToParentID[nodeID]
+		return parentID, ok
+	})
+
+	return xcap.ExportTrace(ctx, capture, logger)
 }

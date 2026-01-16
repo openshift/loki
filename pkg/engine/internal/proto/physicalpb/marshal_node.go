@@ -7,6 +7,7 @@ import (
 
 	"github.com/grafana/loki/v3/pkg/engine/internal/planner/physical"
 	"github.com/grafana/loki/v3/pkg/engine/internal/proto/expressionpb"
+	"github.com/grafana/loki/v3/pkg/engine/internal/types"
 )
 
 type marshaler interface {
@@ -148,12 +149,24 @@ func (n *DataObjScan) MarshalPhysical(nodeID ulid.ULID) (physical.Node, error) {
 	return &physical.DataObjScan{
 		NodeID: nodeID,
 
-		Location:    physical.DataObjLocation(n.Location),
-		Section:     int(n.Section),
-		StreamIDs:   n.StreamIds,
-		Projections: marshalColumnExpressions(n.Projections),
-		Predicates:  marshalExpressions(n.Predicates),
+		Location:     physical.DataObjLocation(n.Location),
+		Section:      int(n.Section),
+		StreamIDs:    n.StreamIds,
+		Projections:  marshalColumnExpressions(n.Projections),
+		Predicates:   marshalExpressions(n.Predicates),
+		MaxTimeRange: marshalTimeRange(n.MaxTimeRange),
 	}, nil
+}
+
+func marshalTimeRange(timeRange *TimeRange) physical.TimeRange {
+	if timeRange == nil {
+		return physical.TimeRange{}
+	}
+
+	return physical.TimeRange{
+		Start: timeRange.Start,
+		End:   timeRange.End,
+	}
 }
 
 func marshalExpressions(exprs []*expressionpb.Expression) []physical.Expression {
@@ -219,9 +232,13 @@ func (n *ColumnCompat) MarshalPhysical(nodeID ulid.ULID) (physical.Node, error) 
 		return nil, err
 	}
 
-	collision, err := n.Collision.MarshalType()
-	if err != nil {
-		return nil, err
+	collisions := make([]types.ColumnType, len(n.Collisions))
+	for i, collision := range n.Collisions {
+		ct, err := collision.MarshalType()
+		if err != nil {
+			return nil, err
+		}
+		collisions[i] = ct
 	}
 
 	return &physical.ColumnCompat{
@@ -229,7 +246,7 @@ func (n *ColumnCompat) MarshalPhysical(nodeID ulid.ULID) (physical.Node, error) 
 
 		Source:      source,
 		Destination: destination,
-		Collision:   collision,
+		Collisions:  collisions,
 	}, nil
 }
 

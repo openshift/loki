@@ -218,13 +218,21 @@ func (n *DataObjScan) UnmarshalPhysical(from physical.Node) error {
 	}
 
 	*n = DataObjScan{
-		Location:    string(scan.Location),
-		Section:     int64(scan.Section),
-		StreamIds:   scan.StreamIDs,
-		Projections: projections,
-		Predicates:  predicates,
+		Location:     string(scan.Location),
+		Section:      int64(scan.Section),
+		StreamIds:    scan.StreamIDs,
+		Projections:  projections,
+		Predicates:   predicates,
+		MaxTimeRange: unmarshalTimeRange(scan.MaxTimeRange),
 	}
 	return nil
+}
+
+func unmarshalTimeRange(from physical.TimeRange) *TimeRange {
+	return &TimeRange{
+		Start: from.Start,
+		End:   from.End,
+	}
 }
 
 func unmarshalExpressions(from []physical.Expression) ([]*expressionpb.Expression, error) {
@@ -309,21 +317,25 @@ func (n *ColumnCompat) UnmarshalPhysical(from physical.Node) error {
 	var (
 		source      expressionpb.ColumnType
 		destination expressionpb.ColumnType
-		collision   expressionpb.ColumnType
 	)
 
 	if err := source.UnmarshalType(compat.Source); err != nil {
 		return err
 	} else if err := destination.UnmarshalType(compat.Destination); err != nil {
 		return err
-	} else if err := collision.UnmarshalType(compat.Collision); err != nil {
-		return err
+	}
+
+	collisions := make([]expressionpb.ColumnType, len(compat.Collisions))
+	for i, ct := range compat.Collisions {
+		if err := collisions[i].UnmarshalType(ct); err != nil {
+			return err
+		}
 	}
 
 	*n = ColumnCompat{
 		Source:      source,
 		Destination: destination,
-		Collision:   collision,
+		Collisions:  collisions,
 	}
 	return nil
 }

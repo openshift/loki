@@ -220,9 +220,10 @@ func (p *Planner) processMakeTable(lp *logical.MakeTable, ctx *Context) (Node, e
 				DataObject: &DataObjScan{
 					NodeID: ulid.Make(),
 
-					Location:  desc.Location,
-					StreamIDs: desc.Streams,
-					Section:   section,
+					Location:     desc.Location,
+					StreamIDs:    desc.Streams,
+					Section:      section,
+					MaxTimeRange: desc.TimeRange,
 				},
 			})
 		}
@@ -236,7 +237,7 @@ func (p *Planner) processMakeTable(lp *logical.MakeTable, ctx *Context) (Node, e
 
 			Source:      types.ColumnTypeMetadata,
 			Destination: types.ColumnTypeMetadata,
-			Collision:   types.ColumnTypeLabel,
+			Collisions:  []types.ColumnType{types.ColumnTypeLabel},
 		}
 		base, err = p.wrapNodeWith(base, compat)
 		if err != nil {
@@ -369,7 +370,8 @@ func (p *Planner) processProjection(lp *logical.Projection, ctx *Context) (Node,
 
 			Source:      types.ColumnTypeParsed,
 			Destination: types.ColumnTypeParsed,
-			Collision:   types.ColumnTypeLabel,
+			// Check for collisions against both label and metadata columns.
+			Collisions: []types.ColumnType{types.ColumnTypeLabel, types.ColumnTypeMetadata},
 		}
 		var err error
 		node, err = p.wrapNodeWith(node, compat)
@@ -593,7 +595,7 @@ func (p *Planner) collapseMathExpressions(lp logical.Value, rootNode bool, ctx *
 
 		return expr, input, inputRef, nil
 	case *logical.Literal:
-		return &LiteralExpr{Literal: v.Literal}, nil, nil, nil
+		return NewLiteral(v.Value()), nil, nil, nil
 	default:
 		// If it is neigher a literal nor an expression, then we continue `p.process` on this node and represent in
 		// as a column ref `value` in the final math expression.

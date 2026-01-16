@@ -2,18 +2,27 @@ package scheduler
 
 import (
 	"fmt"
+	"net/http"
 	"slices"
+	"time"
 
-	"github.com/grafana/loki/v3/pkg/engine/internal/scheduler/wire"
 	"github.com/grafana/loki/v3/pkg/engine/internal/workflow"
 )
 
 // task wraps a [workflow.Task] with its handler.
 type task struct {
+	assignTime time.Time // Time when task was assigned to a worker.
+	queueTime  time.Time // Time when task was enqueued.
+
 	inner   *workflow.Task
 	handler workflow.TaskEventHandler
 
-	owner  *wire.Peer
+	// metadata holds additional metadata associated with the task.
+	// This can be used to stortracing and other information that
+	// should be propagated to workers.
+	metadata http.Header
+
+	owner  *workerConn
 	status workflow.TaskStatus
 }
 
@@ -32,7 +41,7 @@ var validTaskTransitions = map[workflow.TaskState][]workflow.TaskState{
 //
 // Returns true if the state was updated, false otherwise (such as if the task
 // is already in the desired state).
-func (t *task) setState(newStatus workflow.TaskStatus) (bool, error) {
+func (t *task) setState(m *metrics, newStatus workflow.TaskStatus) (bool, error) {
 	oldState, newState := t.status.State, newStatus.State
 
 	if newState == oldState {
@@ -45,5 +54,6 @@ func (t *task) setState(newStatus workflow.TaskStatus) (bool, error) {
 	}
 
 	t.status = newStatus
+	m.tasksTotal.WithLabelValues(newState.String()).Inc()
 	return true, nil
 }
