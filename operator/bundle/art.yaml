@@ -4,7 +4,7 @@ updates:
 - file: "openshift/manifests/loki-operator.clusterserviceversion.yaml"
   update_list:
   - search: "quay.io/openshift/origin-kube-rbac-proxy:latest"
-    replace: "registry.redhat.io/openshift4/ose-kube-rbac-proxy-rhel9@sha256:145e9784b681ac7defa0a1547c03a6db9a587bf9be2820428eee84f58f8f1f24"
+    replace: "registry.redhat.io/openshift4/ose-kube-rbac-proxy-rhel9@sha256:883be225980cafa658d73b7d87ac99a39dce0fa8fb7754158ec28dc218bc903d"
   - search: "0.1.0"
     replace: "6.3.3"
   - search: "olm.skipRange: '>=6.0.0-0 <6.2.0'"
