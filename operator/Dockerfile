@@ -23,5 +23,11 @@ FROM gcr.io/distroless/static:nonroot
 WORKDIR /
 COPY --from=builder /workspace/manager .
 USER 65532:65532
-
+LABEL \
+      description="deploys, configures, and manages Lokistack inside an OpenShift cluster" \
+      io.k8s.display-name="OpenShift Loki Operator" \
+      io.k8s.description="deploys, configures, and manages Lokistack inside an OpenShift cluster" \
+      io.openshift.tags="openshift,logging,loki-operator,observability" \
+      summary="deploys, configures, and manages Lokistack inside an OpenShift cluster" \
+      maintainer="AOS Logging <team-logging@redhat.com>"
 ENTRYPOINT ["/manager"]
