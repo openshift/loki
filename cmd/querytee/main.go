@@ -12,9 +12,11 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/collectors"
 
+	"github.com/grafana/loki/v3/pkg/querytee/comparator"
+
+	"github.com/grafana/loki/v3/pkg/querytee"
 	loki_tracing "github.com/grafana/loki/v3/pkg/tracing"
 	util_log "github.com/grafana/loki/v3/pkg/util/log"
-	"github.com/grafana/loki/v3/tools/querytee"
 )
 
 type Config struct {
@@ -85,7 +87,7 @@ func exit(code int) {
 }
 
 func lokiReadRoutes(cfg Config) []querytee.Route {
-	samplesComparator := querytee.NewSamplesComparator(querytee.SampleComparisonOptions{
+	samplesComparator := comparator.NewSamplesComparator(comparator.SampleComparisonOptions{
 		Tolerance:         cfg.ProxyConfig.ValueComparisonTolerance,
 		UseRelativeError:  cfg.ProxyConfig.UseRelativeError,
 		SkipRecentSamples: cfg.ProxyConfig.SkipRecentSamples,

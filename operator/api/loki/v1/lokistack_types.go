@@ -281,6 +281,14 @@ type TenantsSpec struct {
 	// +kubebuilder:validation:Optional
 	// +operator-sdk:csv:customresourcedefinitions:type=spec,displayName="Openshift"
 	Openshift *OpenshiftTenantSpec `json:"openshift,omitempty"`
+
+	// DisableIngress disables automatic creation of external access resources (Route / Ingress).
+	// When true, no Route or Ingress will be created for the gateway.
+	//
+	// +optional
+	// +kubebuilder:validation:Optional
+	// +operator-sdk:csv:customresourcedefinitions:type=spec,xDescriptors="urn:alm:descriptor:com.tectonic.ui:booleanSwitch",displayName="Disable Ingress"
+	DisableIngress bool `json:"disableIngress,omitempty"`
 }
 
 // OpenshiftTenantSpec defines the configuration specific to Openshift modes.
@@ -1309,6 +1317,8 @@ const (
 	ReasonZoneAwareEmptyLabel LokiStackConditionReason = "ReasonZoneAwareEmptyLabel"
 	// ReasonStorageNeedsSchemaUpdate when the object storage schema version is older than V13
 	ReasonStorageNeedsSchemaUpdate LokiStackConditionReason = "StorageNeedsSchemaUpdate"
+	// ReasonInsufficientIngesterReplicas when the ingester replicas are less than or equal to the replication factor. Which causes log ingestion to stop when ingester pods get restarted.
+	ReasonInsufficientIngesterReplicas LokiStackConditionReason = "InsufficientIngesterReplicas"
 )
 
 // PodStatus is a short description of the status a Pod can be in.

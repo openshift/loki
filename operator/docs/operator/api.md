@@ -1782,6 +1782,9 @@ PodStatusMap
 </tr><tr><td><p>&#34;FailedComponents&#34;</p></td>
 <td><p>ReasonFailedComponents when all/some LokiStack components fail to roll out.</p>
 </td>
+</tr><tr><td><p>&#34;InsufficientIngesterReplicas&#34;</p></td>
+<td><p>ReasonInsufficientIngesterReplicas when the ingester replicas are less than or equal to the replication factor. Which causes log ingestion to stop when ingester pods get restarted.</p>
+</td>
 </tr><tr><td><p>&#34;InvalidGatewayTenantConfigMap&#34;</p></td>
 <td><p>ReasonInvalidGatewayTenantConfigMap when the format of the configmap is invalid.</p>
 </td>
@@ -4957,6 +4960,19 @@ OpenshiftTenantSpec
 <td>
 <em>(Optional)</em>
 <p>Openshift defines the configuration specific to Openshift modes.</p>
+</td>
+</tr>
+<tr>
+<td>
+<code>disableIngress</code><br/>
+<em>
+bool
+</em>
+</td>
+<td>
+<em>(Optional)</em>
+<p>DisableIngress disables automatic creation of external access resources (Route / Ingress).
+When true, no Route or Ingress will be created for the gateway.</p>
 </td>
 </tr>
 </tbody>
