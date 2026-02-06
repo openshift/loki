@@ -1,0 +1,40 @@
+FROM registry-proxy.engineering.redhat.com/rh-osbs/openshift-golang-builder:v1.25.3-202511260833.g5015a16.el9 AS builder
+
+ENV GOEXPERIMENT=strictfipsruntime
+ENV CGO_ENABLED=1
+ENV GOOS=linux
+ENV GOFLAGS="-mod=vendor -p=4"
+
+ENV BUILD_VERSION=3.6.5
+
+ARG SOURCE_GIT_COMMIT
+ENV LOKI_VPREFIX="github.com/grafana/loki/v3/pkg/util/build"
+
+COPY . /opt/app-root/src/loki
+WORKDIR /opt/app-root/src/loki
+
+RUN touch loki-build-image/.uptodate && mkdir -p /build
+RUN go build -ldflags "-s -w -X ${LOKI_VPREFIX}.Branch=upstream-v${BUILD_VERSION} -X ${LOKI_VPREFIX}.Version=v${BUILD_VERSION} -X ${LOKI_VPREFIX}.Revision=${SOURCE_GIT_COMMIT} -X ${LOKI_VPREFIX}.BuildDate=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" -tags strictfipsruntime -o cmd/loki/loki ./cmd/loki/
+
+FROM registry.redhat.io/ubi9/ubi-minimal:9.7
+
+COPY --from=builder /opt/app-root/src/loki/cmd/loki/loki /usr/bin/loki
+COPY --from=builder /opt/app-root/src/loki/cmd/loki/loki-local-config.yaml /etc/loki/local-config.yaml
+
+ENTRYPOINT ["/usr/bin/loki"]
+
+LABEL com.redhat.component="logging-loki-container" \
+      description="Horizontally-scalable, highly-available, multi-tenant log aggregation system inspired by Prometheus." \
+      distribution-scope="subscription" \
+      io.k8s.description="Horizontally-scalable, highly-available, multi-tenant log aggregation system inspired by Prometheus." \
+      io.k8s.display-name="OpenShift Loki" \
+      io.openshift.maintainer.component="Logging" \
+      io.openshift.maintainer.product="OpenShift Container Platform" \
+      io.openshift.tags="openshift,logging,loki" \
+      maintainer="AOS Logging <team-logging@redhat.com>" \
+      name="openshift-logging/logging-loki-rhel9" \
+      summary="Horizontally-scalable, highly-available, multi-tenant log aggregation system inspired by Prometheus." \
+      url="https://catalog.redhat.com/en/software/containers/openshift-logging/logging-loki-rhel9/64479926a759a6e51ef79b12" \
+      vendor="Red Hat, Inc." \
+      version_minor="v3.6" \
+      version=v3.6.5
