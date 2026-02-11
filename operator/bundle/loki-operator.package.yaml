@@ -2,4 +2,4 @@
 packageName: loki-operator
 channels:
 - name: stable-6.3
-  currentCSV: loki-operator.v6.3.3
+  currentCSV: loki-operator.v6.3.4

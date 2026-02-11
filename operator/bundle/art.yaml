@@ -6,6 +6,6 @@ updates:
   - search: "quay.io/openshift/origin-kube-rbac-proxy:latest"
     replace: "registry.redhat.io/openshift4/ose-kube-rbac-proxy-rhel9@sha256:883be225980cafa658d73b7d87ac99a39dce0fa8fb7754158ec28dc218bc903d"
   - search: "0.1.0"
-    replace: "6.3.3"
+    replace: "6.3.4"
   - search: "olm.skipRange: '>=6.0.0-0 <6.2.0'"
-    replace: "olm.skipRange: '>=6.1.0-0 <6.3.3'"
+    replace: "olm.skipRange: '>=6.1.0-0 <6.3.4'"
