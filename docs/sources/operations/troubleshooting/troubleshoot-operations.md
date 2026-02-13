@@ -550,13 +550,200 @@ The `query_store_max_look_back_period` is set to a non-zero value with a storage
 - HTTP status: N/A (startup failure)
 - Configurable per tenant: No
 
+## Authentication and tenant errors
+
+Authentication and tenant errors occur when requests are missing required tenant identification or when tenant IDs are invalid. In multi-tenant mode, every request must include a valid tenant ID.
+
+### Error: No org ID
+
+**Error message:**
+
+```text
+no org id
+```
+
+**Cause:**
+
+A request was made to Loki without the required `X-Scope-OrgID` header. In multi-tenant mode, every request must identify the tenant.
+
+**Resolution:**
+
+1. **Add the `X-Scope-OrgID` header** to your requests:
+
+   ```bash
+   curl -H "X-Scope-OrgID: my-tenant" http://loki:3100/loki/api/v1/push ...
+   ```
+
+1. **For Grafana**, configure the tenant ID in the Loki data source settings under "HTTP Headers".
+
+1. **For Alloy**, set the tenant ID in the `loki.write` component:
+
+   ```alloy
+   loki.write "default" {
+     endpoint {
+       url       = "http://loki:3100/loki/api/v1/push"
+       tenant_id = "my-tenant"
+     }
+   }
+   ```
+
+1. **Disable multi-tenancy** for single-tenant deployments:
+
+   ```yaml
+   auth_enabled: false
+   ```
+
+**Properties:**
+
+- Enforced by: Authentication middleware
+- Retryable: Yes (with tenant ID)
+- HTTP status: 401 Unauthorized
+- Configurable per tenant: No
+
+### Error: Multiple org IDs present
+
+**Error message:**
+
+```text
+multiple org IDs present
+```
+
+**Cause:**
+
+The request contains multiple different tenant IDs, but the operation requires a single tenant. This can happen when a request is forwarded through multiple proxies that each inject a tenant ID.
+
+**Resolution:**
+
+1. **Ensure only one tenant ID** is set in the `X-Scope-OrgID` header.
+1. **Check proxy configurations** for conflicting tenant ID injection.
+1. **For cross-tenant queries**, use pipe-separated tenant IDs only where supported:
+
+   ```bash
+   curl -H "X-Scope-OrgID: tenant1|tenant2" http://loki:3100/loki/api/v1/query ...
+   ```
+
+**Properties:**
+
+- Enforced by: Tenant resolver
+- Retryable: Yes (with correct tenant ID)
+- HTTP status: 400 Bad Request
+- Configurable per tenant: No
+
+### Error: Tenant ID too long
+
+**Error message:**
+
+```text
+tenant ID is too long: max 150 characters
+```
+
+**Cause:**
+
+The tenant ID exceeds the maximum allowed length of 150 characters.
+
+**Resolution:**
+
+1. **Use a shorter tenant ID** (maximum 150 characters).
+
+**Properties:**
+
+- Enforced by: Tenant validation
+- Retryable: Yes (with valid tenant ID)
+- HTTP status: 400 Bad Request
+- Configurable per tenant: No
+
+### Error: Unsafe tenant ID
+
+**Error message:**
+
+```text
+tenant ID is '.' or '..'
+```
+
+**Cause:**
+
+The tenant ID is set to `.` or `..`, which are reserved filesystem path components and could cause path traversal issues.
+
+**Resolution:**
+
+1. **Choose a different tenant ID** that is not `.` or `..`.
+
+**Properties:**
+
+- Enforced by: Tenant validation
+- Retryable: Yes (with valid tenant ID)
+- HTTP status: 400 Bad Request
+- Configurable per tenant: No
+
+### Error: Tenant ID contains unsupported character
+
+**Error message:**
+
+```text
+tenant ID '<id>' contains unsupported character '<char>'
+```
+
+**Cause:**
+
+The tenant ID contains characters that are not allowed. Tenant IDs must consist of alphanumeric characters, hyphens, underscores, and periods.
+
+**Resolution:**
+
+1. **Use only supported characters** in your tenant ID: letters, numbers, hyphens (`-`), underscores (`_`), and periods (`.`).
+
+**Properties:**
+
+- Enforced by: Tenant validation
+- Retryable: Yes (with valid tenant ID)
+- HTTP status: 400 Bad Request
+- Configurable per tenant: No
+
+### Error: Deletion not available for tenant
+
+**Error message:**
+
+```text
+deletion is not available for this tenant
+```
+
+**Cause:**
+
+A delete request was submitted for a tenant that does not have deletion enabled. Log deletion must be explicitly enabled per tenant.
+
+**Resolution:**
+
+1. **Enable deletion for the tenant** in the runtime configuration:
+
+   ```yaml
+   overrides:
+     my-tenant:
+       deletion_mode: filter-and-delete  # Or "filter-only"
+   ```
+
+   Valid deletion modes:
+   - `disabled` - Deletion is not allowed (default)
+   - `filter-only` - Lines matching delete requests are filtered at query time but not physically deleted
+   - `filter-and-delete` - Lines are filtered at query time and physically deleted during compaction
+
+1. **Ensure the compactor is configured** for retention:
+
+   ```yaml
+   compactor:
+     retention_enabled: true
+     delete_request_store: s3
+   ```
+
+**Properties:**
+
+- Enforced by: Compactor deletion handler
+- Retryable: No (configuration must change)
+- HTTP status: 403 Forbidden
+- Configurable per tenant: Yes
+
+
 
 
 <!-- Additional content in next PRs.  Just leaving the headings here for context and so that I can keep things in order if PRs merge out of sequence. -->
-
-## Authentication and tenant errors
-
-
 
 ## Storage backend errors
 
