@@ -14,8 +14,8 @@ import (
 	"github.com/grafana/loki/v3/pkg/xcap"
 )
 
-// ReaderOptions configures how a [RowReader] will read [Row]s.
-type ReaderOptions struct {
+// RowReaderOptions configures how a [RowReader] will read [Row]s.
+type RowReaderOptions struct {
 	Dataset Dataset // Dataset to read from.
 
 	// Columns to read from the Dataset. It is invalid to provide a Column that
@@ -40,7 +40,7 @@ type ReaderOptions struct {
 
 // A RowReader reads [Row]s from a [Dataset].
 type RowReader struct {
-	opts  ReaderOptions
+	opts  RowReaderOptions
 	ready bool // ready is true if the RowReader has been initialized.
 
 	origColumnLookup     map[Column]int // Find the index of a column in opts.Columns.
@@ -54,26 +54,45 @@ type RowReader struct {
 	region *xcap.Region // Region for recording statistics.
 }
 
+var errRowReaderNotOpen = errors.New("row reader not opened")
+
 // NewRowReader creates a new RowReader from the provided options.
-func NewRowReader(opts ReaderOptions) *RowReader {
+//
+// Call [RowReader.Open] before calling [RowReader.Read].
+func NewRowReader(opts RowReaderOptions) *RowReader {
 	var r RowReader
 	r.Reset(opts)
 	return &r
 }
 
+// Open initializes RowReader resources.
+//
+// Open must be called before [RowReader.Read]. Open is safe to call multiple
+// times.
+func (r *RowReader) Open(ctx context.Context) error {
+	if r.ready {
+		return nil
+	}
+
+	if err := r.init(ctx); err != nil {
+		_ = r.Close()
+		return fmt.Errorf("initializing reader: %w", err)
+	}
+	return nil
+}
+
 // Read reads up to the next len(s) rows from r and stores them into s. It
 // returns the number of rows read and any error encountered. At the end of the
 // Dataset, Read returns 0, [io.EOF].
+//
+// Read returns an error if [RowReader.Open] was not called first.
 func (r *RowReader) Read(ctx context.Context, s []Row) (int, error) {
 	if len(s) == 0 {
 		return 0, nil
 	}
 
 	if !r.ready {
-		err := r.init(ctx)
-		if err != nil {
-			return 0, fmt.Errorf("initializing reader: %w", err)
-		}
+		return 0, errRowReaderNotOpen
 	}
 
 	r.region.Record(xcap.StatDatasetReadCalls.Observe(1))
@@ -407,13 +426,13 @@ func (r *RowReader) Close() error {
 
 // Reset discards any state and resets the RowReader with a new set of options.
 // This permits reusing a RowReader rather than allocating a new one.
-func (r *RowReader) Reset(opts ReaderOptions) {
+func (r *RowReader) Reset(opts RowReaderOptions) {
 	r.opts = opts
 
 	// There's not much work Reset can do without a context, since it needs to
 	// retrieve page info. We'll defer this work to an init function. This also
 	// unfortunately means that we might not reset page readers until the first
-	// call to Read.
+	// call to Open.
 	if r.origColumnLookup == nil {
 		r.origColumnLookup = make(map[Column]int, len(opts.Columns))
 	}
@@ -487,7 +506,7 @@ func (r *RowReader) secondaryColumns() []Column {
 }
 
 // validatePredicate ensures that all columns used in a predicate have been
-// provided in [ReaderOptions].
+// provided in [RowReaderOptions].
 func (r *RowReader) validatePredicate() error {
 	process := func(c Column) error {
 		_, ok := r.origColumnLookup[c]
