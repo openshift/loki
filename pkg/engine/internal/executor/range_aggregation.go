@@ -172,7 +172,6 @@ func (r *rangeAggregationPipeline) read(ctx context.Context) (arrow.RecordBatch,
 			}
 
 			inputsExhausted = false
-
 			if record.NumRows() == 0 {
 				// Nothing to process
 				continue
