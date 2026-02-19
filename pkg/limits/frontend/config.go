@@ -49,8 +49,8 @@ func (cfg *Config) RegisterFlags(f *flag.FlagSet) {
 	f.BoolVar(
 		&cfg.AcceptedStreamsCacheEnabled,
 		"ingest-limits-frontend.accepted-streams-cache-enabled",
-		true,
-		"Enable the accepted streams cache.",
+		false,
+		"[Experimental]: Enable the accepted streams cache.",
 	)
 	f.DurationVar(
 		&cfg.AcceptedStreamsCacheTTL,
