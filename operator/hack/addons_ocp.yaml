@@ -29,7 +29,7 @@ spec:
     spec:
       containers:
         - name: logcli
-          image: docker.io/grafana/logcli:3.4.2-amd64
+          image: docker.io/grafana/logcli:3.6.5-amd64
           imagePullPolicy: IfNotPresent
           command:
             - /bin/sh
@@ -70,7 +70,11 @@ spec:
     spec:
       containers:
         - name: promtail
+<<<<<<< HEAD
           image: docker.io/grafana/promtail:3.4.2
+=======
+          image: docker.io/grafana/promtail:3.6.5
+>>>>>>> d81e977f1e (feat(operator): Update Loki operand to v3.6.5 (#20696))
           args:
             - -config.file=/etc/promtail/promtail.yaml
             - -log.level=info
