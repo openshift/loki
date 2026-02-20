@@ -1,0 +1,33 @@
+FROM registry-proxy.engineering.redhat.com/rh-osbs/openshift-golang-builder:v1.25.7-202602171210.g5015a16.el9 AS builder
+
+ENV GOEXPERIMENT=strictfipsruntime
+ENV CGO_ENABLED=1
+ENV GOOS=linux
+ENV GOFLAGS="-p=4"
+
+COPY . /opt/app-root/src/operator
+WORKDIR /opt/app-root/src/operator
+
+RUN go build -tags strictfipsruntime -a -o ./manager ./cmd/loki-operator/main.go
+
+FROM registry.redhat.io/ubi9/ubi-minimal:9.7
+
+COPY --from=builder /opt/app-root/src/operator/manager /manager
+
+ENTRYPOINT ["/manager"]
+
+LABEL com.redhat.component="loki-operator-container" \
+      description="OpenShift Loki Operator to manage LokiStack installs for Openshift Logging." \
+      distribution-scope="subscription" \
+      io.k8s.description="OpenShift Loki Operator to manage LokiStack installs for Openshift Logging." \
+      io.k8s.display-name="OpenShift Loki Operator" \
+      io.openshift.maintainer.component="Logging" \
+      io.openshift.maintainer.product="OpenShift Container Platform" \
+      io.openshift.tags="openshift,logging,loki,loki-operator" \
+      maintainer="AOS Logging <team-logging@redhat.com>" \
+      name="openshift-logging/loki-rhel9-operator" \
+      summary="OpenShift Loki Operator to manage LokiStack installs for Openshift Logging." \
+      url="https://catalog.redhat.com/en/software/containers/openshift-logging/loki-rhel9-operator/64479927e1820602a81cdf13" \
+      vendor="Red Hat, Inc." \
+      version_minor="v6.5" \
+      version="6.5.0"
