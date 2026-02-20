@@ -1,0 +1,5 @@
+---
+packageName: loki-operator
+channels:
+- name: stable-6.4
+  currentCSV: loki-operator.v6.4.4

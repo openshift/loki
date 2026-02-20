@@ -1,0 +1,21 @@
+---
+kind: ImageStream
+apiVersion: image.openshift.io/v1
+spec:
+  tags:
+  - name: logging-loki-rhel9
+    from:
+      kind: DockerImage
+      name: quay.io/openshift-logging/loki:v3.6.5
+  - name: lokistack-gateway-rhel9
+    from:
+      kind: DockerImage
+      name: quay.io/observatorium/api:latest
+  - name: opa-openshift-rhel9
+    from:
+      kind: DockerImage
+      name: quay.io/observatorium/opa-openshift:latest
+  - name: loki-rhel9-operator
+    from:
+      kind: DockerImage
+      name: quay.io/openshift-logging/loki-operator:0.1.0
