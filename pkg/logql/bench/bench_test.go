@@ -48,6 +48,10 @@ var allStores = []string{StoreDataObjV2Engine, StoreChunk}
 
 //go:generate go run ./cmd/generate/main.go -size 2147483648 -dir ./data -tenant test-tenant
 
+func init() {
+	engine.EnableParanoidMode()
+}
+
 // loadTestCases loads test cases from the query registry
 func loadTestCases(tb testing.TB, config *GeneratorConfig) []TestCase {
 	tb.Helper()
