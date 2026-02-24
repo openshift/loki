@@ -64,7 +64,7 @@ type Config struct {
 	SchedulerLookupInterval time.Duration
 
 	// BatchSize specifies the maximum number of rows to retrieve in a single
-	// read call of a task pipeline.
+	// read call of a task pipeline, or to send in a single message to a peer (sink).
 	BatchSize int64
 
 	// PrefetchBytes controls the number of bytes prefetched when opening a
