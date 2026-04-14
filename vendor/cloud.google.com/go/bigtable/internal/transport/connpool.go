@@ -21,24 +21,33 @@ import (
 	"io"
 	"log"
 	"math"
-	"math/rand"
+	"math/rand/v2"
 	"net"
 	"net/url"
+	"os"
 	"slices"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	btpb "cloud.google.com/go/bigtable/apiv2/bigtablepb"
+	"github.com/googleapis/gax-go/v2"
 	"go.opentelemetry.io/otel/attribute"
 	"go.opentelemetry.io/otel/metric"
+	"golang.org/x/oauth2/google"
 	gtransport "google.golang.org/api/transport/grpc"
+	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/credentials/alts"
+	"google.golang.org/grpc/credentials/oauth"
 	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/peer"
+	"google.golang.org/grpc/status"
 
+	"cloud.google.com/go/bigtable/internal/directaccess"
 	btopt "cloud.google.com/go/bigtable/internal/option"
+	gcpmetadata "cloud.google.com/go/compute/metadata"
 
 	"google.golang.org/grpc"
 )
@@ -47,7 +56,13 @@ import (
 // We cap the max draining timeout to 30mins as there might be a long running stream (such as full table scan).
 var maxDrainingTimeout = 30 * time.Minute
 
-const requestParamsHeader = "x-goog-request-params"
+const (
+	// Note this is our Multi Region AFE frontend pool. We send the request to same client region
+	xdsCdsURITemplate            = "xdstp://traffic-director-c2p.xds.googleapis.com/envoy.config.cluster.v3.Cluster/%s-bigtable.googleapis.com/eds_cluster"
+	artificialLoadIfError        = 10
+	artificialLoadPenalizedTimer = 5 * time.Second
+	requestParamsHeader          = "x-goog-request-params"
+)
 
 // ipProtocol represents the type of IP protocol used.
 type ipProtocol int32
@@ -101,6 +116,20 @@ func WithAppProfile(appProfile string) BigtableChannelPoolOption {
 func WithMeterProvider(mp metric.MeterProvider) BigtableChannelPoolOption {
 	return func(p *BigtableChannelPool) {
 		p.meterProvider = mp
+	}
+}
+
+// WithDirectAccessDialer provides the dialer for direct access
+func WithDirectAccessDialer(directAccessDialer func() (*BigtableConn, error)) BigtableChannelPoolOption {
+	return func(p *BigtableChannelPool) {
+		p.directAccessDialer = directAccessDialer
+	}
+}
+
+// WithDirectAccessFeatureFlagsMetadata provides the feature flags required for DirectAccess
+func WithDirectAccessFeatureFlagsMetadata(directAccessFeatureFlagsMD metadata.MD) BigtableChannelPoolOption {
+	return func(p *BigtableChannelPool) {
+		p.directAccessFeatureFlagsMD = directAccessFeatureFlagsMD
 	}
 }
 
@@ -235,6 +264,7 @@ type connEntry struct {
 	streamingLoad atomic.Int32 // In-flight streaming requests
 	errorCount    atomic.Int64 // Errors since the last metric report
 	drainingState atomic.Bool  // True if the connection is being gracefully drained.
+	penaltyExpiry atomic.Int64 // penaltyExpiry stores the UnixNano timestamp of when the penalty ends
 
 }
 
@@ -254,6 +284,25 @@ func (e *connEntry) createdAt() int64 {
 		return 0
 	}
 	return e.conn.creationTime()
+}
+
+// applyErrorPenalty checks if the error warrants a load balancing penalty,
+// and if so, sets an expiration time for the artificial load.
+func (e *connEntry) applyErrorPenalty(err error) {
+	if err == nil {
+		return
+	}
+
+	code := status.Code(err)
+
+	// Penalize errors that typically indicate target-specific health or capacity issues.
+	if code == codes.Unavailable ||
+		code == codes.ResourceExhausted ||
+		code == codes.Internal {
+		// A simple Store is safe here; concurrent updates is fine here.
+		newExpiry := time.Now().Add(artificialLoadPenalizedTimer).UnixNano()
+		e.penaltyExpiry.Store(newExpiry)
+	}
 }
 
 // isDraining atomically checks if the connection is in the draining state.
@@ -298,7 +347,18 @@ func (p *BigtableChannelPool) waitForDrainAndClose(entry *connEntry) {
 func (e *connEntry) calculateConnLoad() int32 {
 	unary := e.unaryLoad.Load()
 	streaming := e.streamingLoad.Load()
-	return unary + streaming
+	load := unary + streaming
+
+	expiry := e.penaltyExpiry.Load()
+	if expiry > 0 {
+		if time.Now().UnixNano() < expiry {
+			load += artificialLoadIfError // Apply the artificial penalty weight
+		} else {
+			// restore to zero
+			e.penaltyExpiry.CompareAndSwap(expiry, 0)
+		}
+	}
+	return load
 }
 
 // BigtableChannelPool implements ConnPool and routes requests to the connection
@@ -320,9 +380,18 @@ type BigtableChannelPool struct {
 	appProfile     string
 	instanceName   string
 	featureFlagsMD metadata.MD
-	meterProvider  metric.MeterProvider
+
+	factory *connectionFactory // Use the factory for connection creation
+
+	meterProvider metric.MeterProvider
 	// configs
 	metricsConfig btopt.MetricsReporterConfig
+
+	directAccessFeatureFlagsMD metadata.MD
+	directAccessDialer         func() (*BigtableConn, error)
+
+	// Add the cached gauge instrument
+	daEligibleGauge metric.Int64Gauge
 
 	// background monitors
 	monitors []Monitor
@@ -367,6 +436,60 @@ func NewBigtableChannelPool(ctx context.Context, connPoolSize int, strategy btop
 		opt(pool)
 	}
 
+	// make the da guage lifetime, optional
+	if pool.meterProvider != nil {
+		meter := pool.meterProvider.Meter(clientMeterName)
+		var err error
+		pool.daEligibleGauge, err = meter.Int64Gauge(
+			"direct_access/compatible",
+			metric.WithDescription("Reports 1 if the environment is eligible for DirectPath, 0 otherwise. Based on a connection attempt at startup."),
+			metric.WithUnit("1"),
+		)
+		if err != nil {
+			btopt.Debugf(pool.logger, "bigtable_connpool: failed to create direct_access/compatible metric: %v", err)
+		}
+	}
+
+	// All standard dialers and feature flags
+	factoryDial := dial
+	factoryFeatureFlagsMD := pool.featureFlagsMD
+
+	var firstConn *BigtableConn
+
+	if pool.directAccessDialer != nil {
+		disableDirectAccess := os.Getenv("CBT_ENABLE_DIRECTPATH") == "false"
+		if disableDirectAccess {
+			btopt.Debugf(pool.logger, "bigtable_connpool: Direct Access manually disabled via CBT_ENABLE_DIRECTPATH.")
+			pool.reportDirectAccessFailure("manually_disabled")
+		} else {
+			directAccessConn, isDirectAccess := pool.checkIfDirectAccessCompatible()
+
+			if isDirectAccess {
+				btopt.Debugf(pool.logger, "bigtable_connpool: Direct Access is available. Using Direct Access now.")
+				factoryDial = pool.directAccessDialer
+				factoryFeatureFlagsMD = pool.directAccessFeatureFlagsMD
+				// transfer
+				firstConn = directAccessConn
+			} else {
+				// If we opened a connection but won't use it, close it now.
+				if directAccessConn != nil {
+					btopt.Debugf(pool.logger, "bigtable_connpool: Closing probe connection (Direct Access unavailable).")
+					directAccessConn.Close()
+				}
+				btopt.Debugf(pool.logger, "bigtable_connpool: Direct Access is not available. Using standard path")
+			}
+		}
+	}
+
+	// Initialize the connectionFactory
+	pool.factory = &connectionFactory{
+		dial:           factoryDial,
+		instanceName:   pool.instanceName,
+		appProfile:     pool.appProfile,
+		featureFlagsMD: factoryFeatureFlagsMD,
+		logger:         pool.logger,
+	}
+
 	// Set the selection function based on the strategy
 	switch strategy {
 	case btopt.LeastInFlight:
@@ -378,7 +501,8 @@ func NewBigtableChannelPool(ctx context.Context, connPoolSize int, strategy btop
 	}
 
 	var exitSignal error
-
+	btopt.Debugf(pool.logger, "bigtable_connpool: Creating conn pool with %d connections", connPoolSize)
+	// TODO: Replace this logic with addConnections(...).
 	initialConns := make([]*connEntry, connPoolSize)
 	for i := 0; i < connPoolSize; i++ {
 		select {
@@ -391,21 +515,20 @@ func NewBigtableChannelPool(ctx context.Context, connPoolSize int, strategy btop
 			break
 		}
 
-		conn, err := dial()
+		var entry *connEntry
+		var err error
+
+		if i == 0 && firstConn != nil {
+			entry = &connEntry{conn: firstConn}
+		} else {
+			entry, err = pool.factory.newEntry(ctx)
+		}
+
 		if err != nil {
 			exitSignal = err
 			break
 		}
-
-		entry := &connEntry{conn: conn}
-		initialConns[i] = entry // Note, we keep non primed conns in conns
-		// Prime the new connection in a non-blocking goroutine to warm it up.
-		go func(e *connEntry) {
-			err := e.conn.Prime(ctx, pool.instanceName, pool.appProfile, pool.featureFlagsMD)
-			if err != nil {
-				btopt.Debugf(pool.logger, "bigtable_connpool: failed to prime initial connection: %v\n", err)
-			}
-		}(entry)
+		initialConns[i] = entry
 	}
 	if exitSignal != nil {
 		btopt.Debugf(pool.logger, "bigtable_connpool: error during initial connection creation: %v\n", exitSignal)
@@ -429,6 +552,11 @@ func NewBigtableChannelPool(ctx context.Context, connPoolSize int, strategy btop
 	} else {
 		btopt.Debugf(pool.logger, "bigtable_connpool: failed to create metrics reporter: %v\n", err)
 	}
+
+	// Initialize and register the Pacemaker
+	pacemaker := NewPacemaker(pool.meterProvider, pool.logger)
+	pool.monitors = append(pool.monitors, pacemaker)
+
 	pool.startMonitors()
 
 	// record the client startup time
@@ -437,6 +565,61 @@ func NewBigtableChannelPool(ctx context.Context, connPoolSize int, strategy btop
 	pool.recordClientStartUp(clientCreationTimestamp, transportType)
 
 	return pool, nil
+}
+
+// checkIfDirectAccessCompatible attempts to create a single connection using the directAccessDialer,
+// primes it, and checks if direct access was successful
+func (p *BigtableChannelPool) checkIfDirectAccessCompatible() (*BigtableConn, bool) {
+	conn, err := p.directAccessDialer()
+	if err != nil {
+		btopt.Debugf(p.logger, "bigtable_connpool: Direct Access failed: %v", err)
+		return nil, false
+	}
+
+	err = conn.Prime(p.poolCtx, p.instanceName, p.appProfile, p.directAccessFeatureFlagsMD)
+	if err != nil {
+		// If the error is PermissionDenied, we check ALTS
+		if status.Code(err) != codes.PermissionDenied {
+			btopt.Debugf(p.logger, "bigtable_connpool: Prime() failed during Direct Access check: %v", err)
+			conn.Close()
+			go p.investigateDirectAccessFailure(err)
+			return nil, false
+		}
+		btopt.Debugf(p.logger, "bigtable_connpool: Prime() failed with PermissionDenied, continuing to ALTS check: %v", err)
+	}
+
+	if conn.isALTSConn.Load() {
+		ipProtocol := conn.ipProtocol()
+		p.reportDirectAccessSuccess(ipProtocol)
+		return conn, true
+	}
+
+	// If not ALTS, discard
+	conn.Close()
+	go p.investigateDirectAccessFailure(err) // Kick off investigation
+	return nil, false
+}
+
+// reportDirectAccessSuccess records a successful direct_access/compatible metric.
+func (p *BigtableChannelPool) reportDirectAccessSuccess(ipPreference string) {
+	if p.daEligibleGauge == nil {
+		return
+	}
+	p.daEligibleGauge.Record(p.poolCtx, 1, metric.WithAttributes(
+		attribute.String("ip_preference", ipPreference),
+		attribute.String("reason", ""),
+	))
+}
+
+// reportDirectAccessFailure records a failed direct_access/compatible metric.
+func (p *BigtableChannelPool) reportDirectAccessFailure(reason string) {
+	if p.daEligibleGauge == nil {
+		return
+	}
+	p.daEligibleGauge.Record(p.poolCtx, 0, metric.WithAttributes(
+		attribute.String("ip_preference", ""),
+		attribute.String("reason", reason),
+	))
 }
 
 func (p *BigtableChannelPool) recordClientStartUp(clientCreationTimestamp time.Time, transportType string) {
@@ -530,25 +713,13 @@ func (p *BigtableChannelPool) replaceConnection(oldEntry *connEntry) {
 		return
 	default:
 	}
-	newConn, err := p.dial()
+	newEntry, err := p.factory.newEntry(p.poolCtx)
 	if err != nil {
-		btopt.Debugf(p.logger, "bigtable_connpool: Failed to redial connection at index %d: %v\n", idx, err)
+		btopt.Debugf(p.logger, "bigtable_connpool: Failed to replace connection at index %d: %v. Closing new conn. Old connection remains (draining).\n", idx, err)
 		return
 	}
 
-	err = newConn.Prime(p.poolCtx, p.instanceName, p.appProfile, p.featureFlagsMD)
-
-	if err != nil {
-		btopt.Debugf(p.logger, "bigtable_connpool: Failed to prime replacement connection at index %d: %v. Closing new conn. Old connection remains (draining).\n", idx, err)
-		newConn.Close() //
-		return          // Abort
-	}
-
 	btopt.Debugf(p.logger, "bigtable_connpool: Successfully primed new connection. Replacing connection at index %d\n", idx)
-	newEntry := &connEntry{
-		conn: newConn,
-	}
-
 	// Copy-on-write
 	newConns := make([]*connEntry, len(currentConns))
 	copy(newConns, currentConns)
@@ -572,6 +743,7 @@ func (p *BigtableChannelPool) Invoke(ctx context.Context, method string, args in
 	err = entry.conn.Invoke(ctx, method, args, reply, opts...)
 	if err != nil {
 		entry.errorCount.Add(1)
+		entry.applyErrorPenalty(err) // Apply penalty on error
 	}
 	return err
 
@@ -633,8 +805,8 @@ func (p *BigtableChannelPool) selectLeastLoadedRandomOfTwo() (*connEntry, error)
 
 	// Retry numConns * 2 times in worst case.
 	for i := 0; i < numConns*2 && numConns > 1; i++ {
-		idx1 := rand.Intn(numConns)
-		idx2 := rand.Intn(numConns)
+		idx1 := rand.IntN(numConns)
+		idx2 := rand.IntN(numConns)
 
 		entry1 := conns[idx1]
 		entry2 := conns[idx2]
@@ -722,6 +894,7 @@ func (s *refCountedStream) SendMsg(m interface{}) error {
 	err := s.ClientStream.SendMsg(m)
 	if err != nil {
 		s.entry.errorCount.Add(1)
+		s.entry.applyErrorPenalty(err)
 		s.decrementLoad()
 	}
 	return err
@@ -734,6 +907,7 @@ func (s *refCountedStream) RecvMsg(m interface{}) error {
 		// io.EOF is a normal stream termination, not an error to be counted.
 		if !errors.Is(err, io.EOF) {
 			s.entry.errorCount.Add(1)
+			s.entry.applyErrorPenalty(err)
 		}
 		s.decrementLoad()
 	}
@@ -785,20 +959,13 @@ func (p *BigtableChannelPool) addConnections(increaseDelta, maxConns int) bool {
 			default:
 			}
 
-			conn, err := p.dial()
+			entry, err := p.factory.newEntry(p.poolCtx)
 			if err != nil {
-				btopt.Debugf(p.logger, "bigtable_connpool: Failed to dial new connection for scale up: %v\n", err)
+				btopt.Debugf(p.logger, "bigtable_connpool: Failed to add new connection: %v. Connection will not be added.\n", err)
 				return
 			}
 
-			err = conn.Prime(p.poolCtx, p.instanceName, p.appProfile, p.featureFlagsMD)
-			if err != nil {
-				btopt.Debugf(p.logger, "bigtable_connpool: Failed to prime new connection: %v. Connection will not be added.\n", err)
-				conn.Close()
-				return
-			}
-
-			results <- &connEntry{conn: conn}
+			results <- entry
 		}()
 	}
 	// Goroutine to close the results channel once all workers are done.
@@ -902,6 +1069,271 @@ func (p *BigtableChannelPool) removeConnections(decreaseDelta, minConns, maxRemo
 	}
 	return len(connsToDrain) > 0
 
+}
+
+// connectionFactory is responsible for creating and priming new Bigtable connections.
+// TODO remove these members from BigtableConnPool struct
+type connectionFactory struct {
+	dial           func() (*BigtableConn, error)
+	instanceName   string
+	appProfile     string
+	featureFlagsMD metadata.MD
+	logger         *log.Logger
+}
+
+// newEntry creates a new connection, primes it, and returns it as a connEntry.
+// Blocks until the connection is successfully primed, or returns an error.
+func (cf *connectionFactory) newEntry(ctx context.Context) (*connEntry, error) {
+	conn, err := cf.dial()
+	if err != nil {
+		return nil, fmt.Errorf("factory dial failed: %w", err)
+	}
+
+	if err := cf.primeWithRetry(ctx, conn); err != nil {
+		conn.Close()
+		return nil, fmt.Errorf("bigtable_connpool:  connection factory prime failed: %w", err)
+	}
+
+	return &connEntry{conn: conn}, nil
+}
+
+// primeWithRetry attempts to prime the connection, retrying with exponential backoff.
+func (cf *connectionFactory) primeWithRetry(ctx context.Context, conn *BigtableConn) error {
+	backoffPolicy := gax.Backoff{
+		Initial:    100 * time.Millisecond,
+		Max:        2 * time.Second,
+		Multiplier: 1.2,
+	}
+	maxAttempts := 3
+	var lastErr error
+	for attempt := 0; attempt < maxAttempts; attempt++ {
+
+		// ctx.Done() returns a error
+		if err := ctx.Err(); err != nil {
+			return fmt.Errorf("bigtable_connpool:  error before prime attempt %d: %w", attempt, err)
+		}
+
+		lastErr = conn.Prime(ctx, cf.instanceName, cf.appProfile, cf.featureFlagsMD)
+		if lastErr == nil {
+			return nil
+		}
+
+		if attempt == maxAttempts-1 {
+			// no need to pause(), short circuit
+			break
+		}
+
+		pause := backoffPolicy.Pause()
+		btopt.Debugf(cf.logger, "bigtable_connpool: Prime failed with  error on attempt %d, retrying in %v: %v", attempt+1, pause, lastErr)
+
+		select {
+		case <-ctx.Done():
+			return fmt.Errorf("context done while backing off for prime: %w", ctx.Err())
+		case <-time.After(pause):
+		}
+	}
+
+	return fmt.Errorf("factory prime failed after %d attempts: %w", maxAttempts, lastErr)
+
+}
+
+// investigateDirectAccessFailure runs asynchronously to determine why Direct Access failed.
+// It reports the failure reason to the metric payload.
+func (p *BigtableChannelPool) investigateDirectAccessFailure(originalErr error) {
+	if err := directaccess.IsRunningOnGCP(); err != nil {
+		btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: %v. Original error: %v", err, originalErr)
+		p.reportDirectAccessFailure("not_in_gcp")
+		return
+	}
+
+	if err := directaccess.CheckMetadataServerReachability(); err != nil {
+		btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: Metadata unreachable: %v", err)
+		p.reportDirectAccessFailure("metadata_unreachable")
+		return
+	}
+
+	ipv4, errV4 := directaccess.FetchIPFromMetadataServer("IPv4")
+	ipv6, errV6 := directaccess.FetchIPFromMetadataServer("IPv6")
+
+	if errV4 != nil && errV6 != nil {
+		btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: Neither IPv4 nor IPv6 assigned. v4Err: %v, v6Err: %v", errV4, errV6)
+		p.reportDirectAccessFailure("no_ip_assigned")
+		return
+	}
+
+	if err := directaccess.CheckLoopbackInterfaceUp(); err != nil {
+		btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: Loopback interface down: %v", err)
+		p.reportDirectAccessFailure("loopback_misconfigured")
+		return
+	}
+
+	if ipv4 != nil {
+		if err := directaccess.CheckLocalIPv4LoopbackAddress(); err != nil {
+			btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: IPv4 loopback missing: %v", err)
+			p.reportDirectAccessFailure("loopback_misconfigured_ipv4")
+			return
+		}
+	}
+
+	if ipv6 != nil {
+		if err := directaccess.CheckLocalIPv6LoopbackAddress(); err != nil {
+			btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: IPv6 loopback missing: %v", err)
+			p.reportDirectAccessFailure("loopback_misconfigured_ipv6")
+			return
+		}
+	}
+
+	v4Plumbed, v6Plumbed := checkIPPlumbing(p.logger, ipv4, ipv6)
+
+	// If the metadata server assigned IPs, but the guest OS hasn't configured any of them on an interface
+	// this is okay for GKE pods.
+	if !v4Plumbed && !v6Plumbed {
+		btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: Metadata IPs are not plumbed to local interfaces (likely containerized). Relying on kernel default routing.")
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+
+	zone, zoneErr := gcpmetadata.ZoneWithContext(ctx)
+	instanceID, idErr := gcpmetadata.InstanceIDWithContext(ctx)
+	btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: Metadata fetch - Zone: %q (err: %v), InstanceID: %q (err: %v)", zone, zoneErr, instanceID, idErr)
+
+	if zoneErr != nil || idErr != nil {
+		btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: Skipping xDS checks (failed to fetch zone or instanceID)")
+		p.reportDirectAccessFailure("metadata_missing")
+		return
+	}
+
+	region := zone
+	if lastDash := strings.LastIndex(zone, "-"); lastDash != -1 {
+		region = zone[:lastDash]
+	}
+
+	// Route to the same client region (MR pool)
+	cdsURI := fmt.Sprintf(xdsCdsURITemplate, region)
+	btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: Checking xDS reachability for Node %s in region %s using URI: %s", instanceID, region, cdsURI)
+
+	// Run EDS
+	endpoints, failReason, err := directaccess.FetchXdsEndpoints(ctx, instanceID, zone, cdsURI)
+	if err != nil {
+		btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: xDS check failed: %v", err)
+		p.reportDirectAccessFailure(failReason)
+		return
+	}
+
+	// FetchXdsEndpoints ensures that endpoints is not empty
+	endpoint := endpoints[0]
+	host, _, err := net.SplitHostPort(endpoint)
+	if err != nil {
+		btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: Failed to split xDS endpoint host/port %q: %v", endpoint, err)
+		p.reportDirectAccessFailure("xds_malformed_endpoint") // Treat as invalid/empty
+		return
+	}
+
+	if err := checkKernelRoutes(ipv4, ipv6, v4Plumbed, v6Plumbed, host, endpoint); err != nil {
+		btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: Kernel route check failed to %s: %v", endpoint, err)
+		p.reportDirectAccessFailure("route_unreachable")
+		return
+	}
+
+	if err := p.probeSingleEndpoint(ctx, endpoint); err != nil {
+		btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: End-to-end ALTS probe failed: %v", err)
+		p.reportDirectAccessFailure("alts_handshake_failed")
+		return
+	}
+
+	btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: Running on GCP, metadata reachable, IPs plumbed, xDS and routes successful, but Direct Access originally failed. Original error: %v", originalErr)
+	p.reportDirectAccessFailure("unknown")
+}
+
+// checkIPPlumbing verifies if the assigned IPs from metadata are actually plumbed to a local network interface.
+func checkIPPlumbing(logger *log.Logger, ipv4, ipv6 *net.IP) (v4Plumbed, v6Plumbed bool) {
+	if ipv4 != nil {
+		if _, err := directaccess.CheckLocalIPv4Addresses(ipv4); err == nil {
+			v4Plumbed = true
+		} else {
+			btopt.Debugf(logger, "bigtable_connpool: Direct Access investigation: IPv4 assigned by metadata but not found on NIC: %v", err)
+		}
+	}
+
+	if ipv6 != nil {
+		if _, err := directaccess.CheckLocalIPv6Addresses(ipv6); err == nil {
+			v6Plumbed = true
+		} else {
+			btopt.Debugf(logger, "bigtable_connpool: Direct Access investigation: IPv6 assigned by metadata but not found on NIC: %v", err)
+		}
+	}
+
+	return v4Plumbed, v6Plumbed
+}
+
+// checkKernelRoutes determines the IP version and checks if a valid route exists to the target endpoint.
+// it is used to see if routing tables are set up properly.
+func checkKernelRoutes(ipv4, ipv6 *net.IP, v4Plumbed, v6Plumbed bool, host, endpoint string) error {
+	ip := net.ParseIP(host)
+	if ip == nil {
+		return fmt.Errorf("invalid IP format: %s", host)
+	}
+
+	if ip.To4() != nil {
+		var srcIP *net.IP
+		if v4Plumbed {
+			srcIP = ipv4
+		}
+		return directaccess.CheckLocalIPv4Routes(srcIP, endpoint)
+	}
+
+	var srcIP *net.IP
+	if v6Plumbed {
+		srcIP = ipv6
+	}
+	return directaccess.CheckLocalIPv6Routes(srcIP, endpoint)
+}
+
+// probeSingleEndpoint attempts an ALTS-authenticated Prime() request directly against a specific IP.
+func (p *BigtableChannelPool) probeSingleEndpoint(ctx context.Context, targetEndpoint string) error {
+	btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: Creating ALTS channel to %s...", targetEndpoint)
+
+	altsCreds := alts.NewClientCreds(alts.DefaultClientOptions())
+	scopes := []string{
+		"https://www.googleapis.com/auth/bigtable.data",
+		"https://www.googleapis.com/auth/cloud-platform",
+	}
+
+	googleCreds, err := google.FindDefaultCredentials(ctx, scopes...)
+	if err != nil {
+		return fmt.Errorf("failed to find default credentials for probe: %w", err)
+	}
+
+	perRPCCreds := oauth.TokenSource{TokenSource: googleCreds.TokenSource}
+
+	// we need both perRpcCreds and transport credentials
+	conn, err := grpc.NewClient(targetEndpoint,
+		grpc.WithTransportCredentials(altsCreds),
+		grpc.WithPerRPCCredentials(perRPCCreds),
+		// alts look at server name and without authority, ALTS will fail.
+		// Technically, it should be data.Endpoint
+		grpc.WithAuthority("bigtable.googleapis.com"),
+	)
+	if err != nil {
+		return fmt.Errorf("grpc.NewClient failed for %s: %w", targetEndpoint, err)
+	}
+	defer conn.Close()
+
+	// 2. Wrap it in the internal BigtableConn
+	btc := NewBigtableConn(conn)
+
+	// 3. Attempt a single Prime() request with a strict timeout
+	primeCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+
+	btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: Executing Prime() on %s...", targetEndpoint)
+	if err := btc.Prime(primeCtx, p.instanceName, p.appProfile, p.directAccessFeatureFlagsMD); err != nil {
+		return fmt.Errorf("Prime() failed: %w", err)
+	}
+
+	btopt.Debugf(p.logger, "bigtable_connpool: Direct Access investigation: Prime() SUCCESS on %s!", targetEndpoint)
+	return nil
 }
 
 type multiError []error
