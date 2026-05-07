@@ -93,7 +93,6 @@ type Builder struct {
 
 	// Kafka client and topic/partition info
 	client kafkaClient
-	topic  string
 
 	// Indexer handles all index building
 	indexer indexer
@@ -148,6 +147,10 @@ func NewIndexBuilder(
 
 	if err := builder.RegisterMetrics(builderReg); err != nil {
 		return nil, fmt.Errorf("failed to register metrics for index builder: %w", err)
+	}
+
+	if err := calculator.RegisterMetrics(builderReg); err != nil {
+		return nil, fmt.Errorf("failed to register metrics for calculator: %w", err)
 	}
 
 	s := &Builder{
