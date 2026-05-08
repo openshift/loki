@@ -14,3 +14,7 @@ spec:
             value: quay.io/observatorium/api:latest
           - name: RELATED_IMAGE_OPA
             value: quay.io/observatorium/opa-openshift:latest
+          resources:
+            requests:
+              cpu: 200m
+              memory: 256Mi
