@@ -229,13 +229,18 @@ func (i *instance) consumeChunk(ctx context.Context, ls labels.Labels, chunk *lo
 // happened to *the last stream in the request*. Ex: if three streams are part of the PushRequest
 // and all three failed, the returned error only describes what happened to the last processed stream.
 func (i *instance) Push(ctx context.Context, req *logproto.PushRequest) error {
+	i.metrics.pushInflight.Inc()
+	defer i.metrics.pushInflight.Dec()
+
 	record := recordPool.GetRecord()
 	record.UserID = i.instanceID
 	defer recordPool.PutRecord(record)
 	rateLimitWholeStream := i.limiter.limits.ShardStreams(i.instanceID).Enabled
 
 	var appendErr error
+	var chunkLockTotal time.Duration
 	for _, reqStream := range req.Streams {
+		lockStart := time.Now()
 
 		s, _, err := i.streams.LoadOrStoreNew(reqStream.Labels,
 			func() (*stream, error) {
@@ -259,9 +264,12 @@ func (i *instance) Push(ctx context.Context, req *logproto.PushRequest) error {
 
 		_, appendErr = s.Push(ctx, reqStream.Entries, record, 0, false, rateLimitWholeStream, i.customStreamsTracker, req.Format)
 		s.chunkMtx.Unlock()
+		chunkLockTotal += time.Since(lockStart)
 	}
+	i.metrics.pushChunkMemoryDuration.Observe(chunkLockTotal.Seconds())
 
 	if !record.IsEmpty() {
+		walStart := time.Now()
 		if err := i.wal.Log(record); err != nil {
 			if e, ok := err.(*os.PathError); ok && e.Err == syscall.ENOSPC {
 				i.metrics.walDiskFullFailures.Inc()
@@ -272,9 +280,15 @@ func (i *instance) Push(ctx context.Context, req *logproto.PushRequest) error {
 					)
 				})
 			} else {
+				i.metrics.pushWALDuration.Observe(time.Since(walStart).Seconds())
 				return err
 			}
 		}
+		i.metrics.pushWALDuration.Observe(time.Since(walStart).Seconds())
+	}
+
+	if ctx.Err() != nil {
+		i.metrics.pushContextAlreadyDone.Inc()
 	}
 
 	return appendErr
