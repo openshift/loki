@@ -71,6 +71,12 @@ type ingesterMetrics struct {
 	flushQueueLength       prometheus.Gauge
 	duplicateLogBytesTotal *prometheus.CounterVec
 	streamsOwnershipCheck  prometheus.Histogram
+
+	// Push path instrumentation (LOG-9387 investigation)
+	pushChunkMemoryDuration prometheus.Histogram
+	pushWALDuration         prometheus.Histogram
+	pushInflight            prometheus.Gauge
+	pushContextAlreadyDone  prometheus.Counter
 }
 
 // setRecoveryBytesInUse bounds the bytes reports to >= 0.
@@ -334,5 +340,24 @@ func newIngesterMetrics(r prometheus.Registerer, metricsNamespace string) *inges
 			Name:      "duplicate_log_bytes_total",
 			Help:      "The total number of bytes that were discarded for duplicate log lines.",
 		}, []string{"tenant"}),
+
+		pushChunkMemoryDuration: promauto.With(r).NewHistogram(prometheus.HistogramOpts{
+			Name:    "loki_ingester_push_chunk_memory_duration_seconds",
+			Help:    "Time spent reading entries into chunk memory per push request.",
+			Buckets: prometheus.ExponentialBuckets(0.001, 4, 9),
+		}),
+		pushWALDuration: promauto.With(r).NewHistogram(prometheus.HistogramOpts{
+			Name:    "loki_ingester_push_wal_duration_seconds",
+			Help:    "Time spent writing to the WAL per push request.",
+			Buckets: prometheus.ExponentialBuckets(0.001, 4, 9),
+		}),
+		pushInflight: promauto.With(r).NewGauge(prometheus.GaugeOpts{
+			Name: "loki_ingester_push_inflight",
+			Help: "Number of push requests currently being processed.",
+		}),
+		pushContextAlreadyDone: promauto.With(r).NewCounter(prometheus.CounterOpts{
+			Name: "loki_ingester_push_context_already_done_total",
+			Help: "Total push requests that completed after their context was already canceled.",
+		}),
 	}
 }
