@@ -2,160 +2,124 @@ package postings
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 
-	"github.com/grafana/loki/v3/pkg/columnar"
+	"github.com/apache/arrow-go/v18/arrow"
+	"github.com/apache/arrow-go/v18/arrow/memory"
+
+	iter "github.com/grafana/loki/v3/pkg/iter/v2"
 )
 
-// RowReader reads typed [Posting] rows from a postings [Section].
+// RowReader reads [Row] records from a postings [Section] one row at a time, in
+// section order. It is a row-level cursor over the batch-level [Reader].
+// It implements [iter.CloseIterator] over [Row].
 //
-// RowReader wraps a [Reader] to provide typed [Posting] values instead of
-// raw columnar arrays.
+// A RowReader is not safe for concurrent use.
 type RowReader struct {
-	reader *Reader
+	ctx     context.Context
+	reader  *Reader
+	batch   arrow.RecordBatch
+	index   int
+	columns ColumnIndex
+	opened  bool
 
-	// off tracks the current row offset (for EOF detection).
-	off int
+	cur       Row   // current value, valid between Next() returning true and the next Next() call
+	err       error // captured if iteration ends with anything other than io.EOF
+	exhausted bool  // set when Next has returned false; further calls return false without work
 }
 
-// NewRowReader creates a new RowReader that reads typed [Posting] rows from the
-// provided [Section].
-func NewRowReader(sec *Section) (*RowReader, error) {
-	r, err := NewReader(sec)
+// NewRowReader creates a RowReader over all of sec's columns. The underlying
+// reader is opened lazily on the first call to Next. The provided ctx governs
+// all subsequent I/O (Open and Read).
+func NewRowReader(ctx context.Context, sec *Section) *RowReader {
+	return &RowReader{
+		ctx: ctx,
+		reader: NewReader(ReaderOptions{
+			Columns:   sec.Columns(),
+			Allocator: memory.DefaultAllocator,
+		}),
+	}
+}
+
+var _ iter.CloseIterator[Row] = (*RowReader)(nil)
+
+// Next advances the cursor. Returns false on exhaustion (natural EOF or any
+// error). Subsequent calls continue to return false.
+func (r *RowReader) Next() bool {
+	if r.exhausted {
+		return false
+	}
+	rec, err := r.next()
+	if errors.Is(err, io.EOF) {
+		r.exhausted = true
+		return false
+	}
 	if err != nil {
-		return nil, fmt.Errorf("creating reader: %w", err)
+		r.err = err
+		r.exhausted = true
+		return false
 	}
-	return &RowReader{reader: r}, nil
+	r.cur = rec
+	return true
 }
 
-// Read reads up to len(p) postings from the reader into p. It returns the
-// number of postings read and any error encountered. At the end of the
-// section, Read returns 0, [io.EOF].
-func (r *RowReader) Read(ctx context.Context, p []Posting) (int, error) {
-	if r.off >= r.reader.RowCount() {
-		return 0, io.EOF
-	}
-
-	n := len(p)
-	if n == 0 {
-		return 0, nil
-	}
-
-	// Read all columns for the requested batch.
-	kinds, err := r.reader.readInt64Column(ctx, colKind, n)
-	if err != nil && err != io.EOF {
-		return 0, fmt.Errorf("reading kind: %w", err)
-	}
-	objectPaths, err := r.reader.readStringColumn(ctx, colObjectPath, n)
-	if err != nil && err != io.EOF {
-		return 0, fmt.Errorf("reading object_path: %w", err)
-	}
-	sectionIndexes, err := r.reader.readInt64Column(ctx, colSectionIndex, n)
-	if err != nil && err != io.EOF {
-		return 0, fmt.Errorf("reading section_index: %w", err)
-	}
-	columnNames, err := r.reader.readStringColumn(ctx, colColumnName, n)
-	if err != nil && err != io.EOF {
-		return 0, fmt.Errorf("reading column_name: %w", err)
-	}
-	labelValues, err := r.reader.readStringColumn(ctx, colLabelValue, n)
-	if err != nil && err != io.EOF {
-		return 0, fmt.Errorf("reading label_value: %w", err)
-	}
-	bloomFilters, err := r.reader.readBytesColumn(ctx, colBloomFilter, n)
-	if err != nil && err != io.EOF {
-		return 0, fmt.Errorf("reading bloom_filter: %w", err)
-	}
-	streamIDBitmaps, err := r.reader.readBytesColumn(ctx, colStreamIDBitmap, n)
-	if err != nil && err != io.EOF {
-		return 0, fmt.Errorf("reading stream_id_bitmap: %w", err)
-	}
-	uncompressedSizes, err := r.reader.readInt64Column(ctx, colUncompressedSize, n)
-	if err != nil && err != io.EOF {
-		return 0, fmt.Errorf("reading uncompressed_size: %w", err)
-	}
-	minTimestamps, err := r.reader.readInt64Column(ctx, colMinTimestamp, n)
-	if err != nil && err != io.EOF {
-		return 0, fmt.Errorf("reading min_timestamp: %w", err)
-	}
-	maxTimestamps, err := r.reader.readInt64Column(ctx, colMaxTimestamp, n)
-	if err != nil && err != io.EOF {
-		return 0, fmt.Errorf("reading max_timestamp: %w", err)
-	}
-
-	// All columns should have the same length. Clamp to len(p) so callers
-	// passing a smaller destination buffer don't trigger an out-of-bounds write.
-	read := min(len(kinds), len(p))
-	for i := range read {
-		p[i] = Posting{
-			Kind:             PostingKind(kinds[i]),
-			ObjectPath:       objectPaths[i],
-			SectionIndex:     sectionIndexes[i],
-			ColumnName:       columnNames[i],
-			LabelValue:       labelValues[i],
-			BloomFilter:      bloomFilters[i],
-			StreamIDBitmap:   streamIDBitmaps[i],
-			UncompressedSize: uncompressedSizes[i],
-			MinTimestamp:     minTimestamps[i],
-			MaxTimestamp:     maxTimestamps[i],
+// next reads the next Row from the section. Returns io.EOF when exhausted.
+func (r *RowReader) next() (Row, error) {
+	if !r.opened {
+		if err := r.reader.Open(r.ctx); err != nil {
+			return Row{}, fmt.Errorf("opening reader: %w", err)
 		}
+		r.opened = true
 	}
 
-	r.off += read
-	if r.off >= r.reader.RowCount() {
-		return read, io.EOF
-	}
-	return read, nil
-}
+	if r.batch == nil || r.index >= int(r.batch.NumRows()) {
+		r.batch = nil
 
-// Close closes the RowReader and releases any resources it holds.
-func (r *RowReader) Close() error {
-	return r.reader.Close()
-}
+		batch, err := r.reader.Read(r.ctx, 8192)
+		if errors.Is(err, io.EOF) && batch == nil {
+			return Row{}, io.EOF
+		}
+		if err != nil && !errors.Is(err, io.EOF) {
+			return Row{}, fmt.Errorf("reading batch: %w", err)
+		}
 
-// extractInt64Values extracts int64 values from a columnar.Array.
-func extractInt64Values(arr columnar.Array) ([]int64, error) {
-	numArr, ok := arr.(*columnar.Number[int64])
-	if !ok {
-		return nil, fmt.Errorf("expected *columnar.Number[int64], got %T", arr)
-	}
-	values := numArr.Values()
-	result := make([]int64, len(values))
-	copy(result, values)
-	return result, nil
-}
-
-// extractStringValues extracts string values from a columnar.Array (non-nullable).
-func extractStringValues(arr columnar.Array) ([]string, error) {
-	utf8Arr, ok := arr.(*columnar.UTF8)
-	if !ok {
-		return nil, fmt.Errorf("expected *columnar.UTF8, got %T", arr)
-	}
-	result := make([]string, utf8Arr.Len())
-	for i := range utf8Arr.Len() {
-		result[i] = string(utf8Arr.Get(i))
-	}
-	return result, nil
-}
-
-// extractBytesValues extracts byte slices from a columnar.Array (binary or
-// nullable binary). Null entries are returned as nil slices.
-func extractBytesValues(arr columnar.Array) ([][]byte, error) {
-	utf8Arr, ok := arr.(*columnar.UTF8)
-	if !ok {
-		return nil, fmt.Errorf("expected *columnar.UTF8, got %T", arr)
-	}
-	result := make([][]byte, utf8Arr.Len())
-	for i := range utf8Arr.Len() {
-		if utf8Arr.IsNull(i) {
-			result[i] = nil
+		if batch != nil && batch.NumRows() > 0 {
+			r.batch = batch
+			r.index = 0
+			if r.columns == nil {
+				r.columns = BuildColumnIndex(batch.Schema())
+			}
 		} else {
-			val := utf8Arr.Get(i)
-			copied := make([]byte, len(val))
-			copy(copied, val)
-			result[i] = copied
+			// Empty or nil batch: treat as end of section.
+			return Row{}, io.EOF
 		}
 	}
-	return result, nil
+
+	row := DecodeRow(r.batch, r.columns, r.index)
+	r.index++
+	return row, nil
+}
+
+// At returns the current record. Undefined if Next has not been called or if
+// the last Next call returned false.
+func (r *RowReader) At() Row { return r.cur }
+
+// Err returns any error that caused iteration to end. nil on natural EOF.
+func (r *RowReader) Err() error { return r.err }
+
+// Close releases the underlying reader. Repeat calls return nil without
+// re-closing.
+func (r *RowReader) Close() error {
+	// Mark exhausted so a stray Next() after Close() returns false instead of
+	// dereferencing the now-nil reader.
+	r.exhausted = true
+	r.batch = nil
+	if r.reader != nil {
+		err := r.reader.Close()
+		r.reader = nil
+		return err
+	}
+	return nil
 }

@@ -10,19 +10,17 @@ import (
 	"sync"
 	"time"
 
-	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/go-kit/log"
 	"github.com/go-kit/log/level"
 	"github.com/oklog/ulid/v2"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"go.opentelemetry.io/otel"
-	"go.opentelemetry.io/otel/trace"
 
 	"github.com/grafana/loki/v3/pkg/engine/internal/executor"
 	"github.com/grafana/loki/v3/pkg/engine/internal/planner/physical"
+	"github.com/grafana/loki/v3/pkg/engine/internal/scheduler/schedulerstat"
 	"github.com/grafana/loki/v3/pkg/engine/internal/util/dag"
-	"github.com/grafana/loki/v3/pkg/logqlmodel/stats"
 	"github.com/grafana/loki/v3/pkg/xcap"
 )
 
@@ -47,8 +45,9 @@ var (
 
 // Options configures a [Workflow].
 type Options struct {
-	Tenant string   // Tenant ID associated with the workflow.
-	Actor  []string // Optional path to the actor that is generating the workflow.
+	ID     ulid.ULID // Optional ID for the workflow. One will be generated if not provided.
+	Tenant string    // Tenant ID associated with the workflow.
+	Actor  []string  // Optional path to the actor that is generating the workflow.
 
 	// MaxRunningScanTasks specifies the maximum number of scan tasks that may
 	// run concurrently within a single workflow. 0 means no limit.
@@ -57,6 +56,16 @@ type Options struct {
 	// MaxRunningOtherTasks specifies the maximum number of non-scan tasks that
 	// may run concurrently within a single workflow. 0 means no limit.
 	MaxRunningOtherTasks int
+
+	// MaxRunningCompactionTasks specifies the maximum number of compaction
+	// tasks that may run concurrently within a single workflow. 0 means no
+	// limit.
+	//
+	// The lane is dormant in query workflows (typeFor never classifies a
+	// query task as compaction); compactor workflows opt in by populating
+	// this field once the dataobj-compaction physical-plan node types and
+	// the corresponding typeFor classification land.
+	MaxRunningCompactionTasks int
 
 	// DebugTasks toggles debug messages for a task. This is very verbose and
 	// should only be enabled for debugging purposes.
@@ -117,18 +126,16 @@ type Workflow struct {
 	resultsPipeline *streamPipe
 	manifest        *Manifest
 
-	statsMut sync.Mutex
-	stats    stats.Result
-
 	captureMut sync.Mutex
 	// used to merge and link task regions
 	capture      *xcap.Capture
 	parentRegion *xcap.Region
 
-	span trace.Span
+	span *xcap.Span
 
-	tasksMut   sync.RWMutex
-	taskStates map[*Task]TaskState
+	tasksMut         sync.RWMutex
+	taskStates       map[*Task]TaskState
+	pendingSummaries map[*Task]pendingSummary // Holds terminal task state until Close.
 
 	streamsMut   sync.RWMutex
 	streamStates map[*Stream]StreamState
@@ -141,8 +148,8 @@ type Workflow struct {
 // cannot be partitioned into a Workflow.
 //
 // The provided Runner will be used for Workflow execution.
-func New(opts Options, logger log.Logger, runner Runner, plan *physical.Plan) (*Workflow, error) {
-	graph, err := planWorkflow(opts.Tenant, plan, cacheParams{
+func New(ctx context.Context, opts Options, logger log.Logger, runner Runner, plan *physical.Plan) (*Workflow, error) {
+	graph, err := planWorkflow(ctx, opts.Tenant, plan, cacheParams{
 		enabled:                     opts.CacheEnabled,
 		taskCacheMaxSizeBytes:       opts.MaxTaskCacheSize,
 		dataObjScanMaxSizeBytes:     opts.MaxDataObjScanCacheSize,
@@ -161,11 +168,12 @@ func New(opts Options, logger log.Logger, runner Runner, plan *physical.Plan) (*
 	if graph.Len() == 0 {
 		level.Debug(logger).Log("msg", "workflow plan is empty")
 		return &Workflow{
-			opts:         opts,
-			logger:       logger,
-			runner:       runner,
-			taskStates:   make(map[*Task]TaskState),
-			streamStates: make(map[*Stream]StreamState),
+			opts:             opts,
+			logger:           logger,
+			runner:           runner,
+			taskStates:       make(map[*Task]TaskState),
+			streamStates:     make(map[*Stream]StreamState),
+			pendingSummaries: make(map[*Task]pendingSummary),
 		}, nil
 	}
 
@@ -183,10 +191,14 @@ func New(opts Options, logger log.Logger, runner Runner, plan *physical.Plan) (*
 		resultsStream:   results,
 		resultsPipeline: newStreamPipe(),
 
-		taskStates:   make(map[*Task]TaskState),
-		streamStates: make(map[*Stream]StreamState),
+		taskStates:       make(map[*Task]TaskState),
+		streamStates:     make(map[*Stream]StreamState),
+		pendingSummaries: make(map[*Task]pendingSummary),
 	}
-	if err := wf.init(context.Background()); err != nil {
+	// Detach cancellation from the caller's ctx so a cancellation of the
+	// planning context does not abort the manifest registration, but keep
+	// the xcap region attached for observation recording.
+	if err := wf.init(context.WithoutCancel(ctx)); err != nil {
 		wf.Close()
 		return nil, err
 	}
@@ -221,8 +233,13 @@ func injectResultsStream(tenantID string, graph *dag.Graph[*Task]) (*Stream, err
 
 // init initializes the workflow.
 func (wf *Workflow) init(ctx context.Context) error {
+	id := wf.opts.ID
+	if id.IsZero() {
+		id = ulid.Make()
+	}
+
 	wf.manifest = &Manifest{
-		ID:     ulid.Make(),
+		ID:     id,
 		Tenant: wf.opts.Tenant,
 		Actor:  wf.opts.Actor,
 
@@ -268,6 +285,11 @@ func (wf *Workflow) Close() {
 	if err := wf.runner.UnregisterManifest(context.Background(), wf.manifest); err != nil {
 		level.Warn(wf.logger).Log("msg", "failed to unregister workflow manifest", "err", err)
 	}
+
+	// UnregisterManifest synchronously drives every remaining task to a terminal
+	// state and delivers its status, so by here the DAG and all per-task finish
+	// times are recorded and the critical path is complete.
+	wf.flushTaskSummaries()
 }
 
 // Run executes the workflow, returning a pipeline to read results from. The
@@ -287,29 +309,19 @@ func (wf *Workflow) Run(ctx context.Context) (pipeline executor.Pipeline, err er
 	// wf.Run tracks the lifetime of the workflow execution.
 	ctx, wf.span = xcap.StartSpan(ctx, tracer, "wf.Run")
 
-	wrapped := &wrappedPipeline{
-		inner: wf.resultsPipeline,
-		onClose: func() {
-			// Merge final stats results back into the caller.
-			wf.statsMut.Lock()
-			defer wf.statsMut.Unlock()
-			stats.JoinResults(ctx, wf.stats)
-		},
-	}
-
 	// Start dispatching in background goroutine
 	gotrace.Log(ctx, "dispatch_tasks", "starting dispatch of "+strconv.Itoa(len(wf.manifest.Tasks))+" tasks")
 	go func() {
 		err := wf.dispatchTasks(ctx, wf.manifest.Tasks)
 		if err != nil {
 			wf.resultsPipeline.SetError(err)
-			wrapped.Close()
+			wf.resultsPipeline.Close()
 		} else {
 			gotrace.Log(ctx, "dispatch_tasks", "all tasks dispatched")
 		}
 	}()
 
-	return wrapped, nil
+	return wf.resultsPipeline, nil
 }
 
 // dispatchTasks groups the slice of tasks by their associated "admission lane" (token bucket)
@@ -320,6 +332,7 @@ func (wf *Workflow) dispatchTasks(ctx context.Context, tasks []*Task) error {
 	wf.admissionControl = newAdmissionControl(
 		int64(wf.opts.MaxRunningScanTasks),
 		int64(wf.opts.MaxRunningOtherTasks),
+		int64(wf.opts.MaxRunningCompactionTasks),
 	)
 
 	// this span captures the time spent waiting for all tasks to be admitted
@@ -335,9 +348,16 @@ func (wf *Workflow) dispatchTasks(ctx context.Context, tasks []*Task) error {
 	region.Record(xcap.StatTaskCount.Observe(int64(len(tasks))))
 
 	groups := wf.admissionControl.groupByType(tasks)
+	// taskTypeCompaction is appended last because the loop is sequential
+	// (each lane is fully drained before the next): a populated Compaction
+	// lane should never delay Scan dispatch. The lane is currently dormant
+	// — typeFor does not classify any task as compaction — so this slot is
+	// always empty for query workflows. It will be populated once the
+	// dataobj-compaction node types and typeFor classification land.
 	for _, taskType := range []taskType{
 		taskTypeOther,
 		taskTypeScan,
+		taskTypeCompaction,
 	} {
 		lane := wf.admissionControl.get(taskType)
 		tasks := groups[taskType]
@@ -355,7 +375,8 @@ func (wf *Workflow) dispatchTasks(ctx context.Context, tasks []*Task) error {
 
 			region.Record(xcap.StatTaskAdmissionWaitDuration.Observe(time.Since(start).Seconds()))
 
-			if err := wf.runner.Start(ctx, tasks[offset:offset+batchSize]...); err != nil {
+			batch := tasks[offset : offset+batchSize]
+			if err := wf.runner.Start(ctx, batch...); err != nil {
 				return fmt.Errorf("failed to start tasks: %w", err)
 			}
 		}
@@ -419,14 +440,43 @@ func (wf *Workflow) onStreamChange(_ context.Context, stream *Stream, newState S
 	}
 
 	wf.streamsMut.Lock()
-	defer wf.streamsMut.Unlock()
-
 	wf.streamStates[stream] = newState
+	shouldCloseResults := newState == StreamStateClosed && stream.ULID == wf.resultsStream.ULID
+	wf.streamsMut.Unlock()
 
-	if newState == StreamStateClosed && stream.ULID == wf.resultsStream.ULID {
-		// Close the results pipeline once the results stream has closed.
-		wf.resultsPipeline.Close()
+	if shouldCloseResults {
+		wf.maybeCloseResults()
 	}
+}
+
+// resultsStreamClosed reports whether the results stream has reached
+// StreamStateClosed. Callers must hold streamsMut.
+func (wf *Workflow) resultsStreamClosed() bool {
+	return wf.streamStates[wf.resultsStream] == StreamStateClosed
+}
+
+// maybeCloseResults closes the results pipeline (signaling EOF) only once the
+// results stream has closed AND every task is terminal, so any failed task's
+// SetError happens-before the EOF. Idempotent; safe to call from any handler.
+func (wf *Workflow) maybeCloseResults() {
+	wf.streamsMut.RLock()
+	streamClosed := wf.resultsStreamClosed()
+	wf.streamsMut.RUnlock()
+
+	if !streamClosed {
+		return
+	}
+
+	wf.tasksMut.RLock()
+	for _, state := range wf.taskStates {
+		if !state.Terminal() {
+			wf.tasksMut.RUnlock()
+			return
+		}
+	}
+	wf.tasksMut.RUnlock()
+
+	wf.resultsPipeline.Close()
 }
 
 func (wf *Workflow) onTaskChange(ctx context.Context, task *Task, newStatus TaskStatus) {
@@ -437,6 +487,9 @@ func (wf *Workflow) onTaskChange(ctx context.Context, task *Task, newStatus Task
 	wf.tasksMut.Lock()
 	oldState := wf.taskStates[task]
 	wf.taskStates[task] = newStatus.State
+	if newStatus.State.Terminal() && oldState != newStatus.State {
+		wf.recordTerminal(task, oldState, newStatus)
+	}
 	wf.tasksMut.Unlock()
 
 	if newStatus.State.Terminal() {
@@ -444,6 +497,23 @@ func (wf *Workflow) onTaskChange(ctx context.Context, task *Task, newStatus Task
 	} else {
 		wf.handleNonTerminalStateChange(ctx, task, newStatus)
 	}
+}
+
+// recordTerminal stashes a terminal task's summary and finish time for Close to
+// emit. Recording both under one lock is what lets flushTaskSummaries trust that
+// observing every task terminal implies every summary and finish is present.
+// wf.tasksMut must be held.
+func (wf *Workflow) recordTerminal(task *Task, oldState TaskState, newStatus TaskStatus) {
+	summary := pendingSummary{
+		oldState: oldState,
+		status:   newStatus,
+	}
+	if newStatus.Capture != nil {
+		if finish, ok := xcap.TryValue[int64](newStatus.Capture, schedulerstat.TaskFinishTime); ok {
+			summary.taskFinishNanos = finish
+		}
+	}
+	wf.pendingSummaries[task] = summary
 }
 
 func (wf *Workflow) handleTerminalStateChange(ctx context.Context, task *Task, oldState TaskState, newStatus TaskStatus) {
@@ -467,10 +537,6 @@ func (wf *Workflow) handleTerminalStateChange(ctx context.Context, task *Task, o
 
 	if newStatus.Capture != nil {
 		wf.mergeCapture(newStatus.Capture)
-	}
-
-	if newStatus.Statistics != nil {
-		wf.mergeResults(*newStatus.Statistics)
 	}
 
 	// task reached a terminal state. We need to detect if task's immediate
@@ -503,6 +569,9 @@ func (wf *Workflow) handleTerminalStateChange(ctx context.Context, task *Task, o
 	wf.tasksMut.RUnlock()
 
 	wf.cancelTasks(ctx, tasksToCancel)
+
+	// Close the results pipeline if it was waiting on this task to finish.
+	wf.maybeCloseResults()
 }
 
 func (wf *Workflow) handleNonTerminalStateChange(ctx context.Context, task *Task, newStatus TaskStatus) {
@@ -555,42 +624,5 @@ func (wf *Workflow) mergeCapture(capture *xcap.Capture) {
 	wf.captureMut.Lock()
 	defer wf.captureMut.Unlock()
 
-	if wf.capture == nil || capture == nil {
-		return
-	}
-
-	if wf.parentRegion != nil {
-		capture.LinkParent(wf.parentRegion)
-	}
-
-	// Merge all regions from the task's capture into the workflow's capture.
-	for _, region := range capture.Regions() {
-		wf.capture.AddRegion(region)
-	}
-}
-
-func (wf *Workflow) mergeResults(results stats.Result) {
-	wf.statsMut.Lock()
-	defer wf.statsMut.Unlock()
-
-	wf.stats.Merge(results)
-}
-
-type wrappedPipeline struct {
-	inner   executor.Pipeline
-	onClose func()
-}
-
-func (p *wrappedPipeline) Open(ctx context.Context) error {
-	return p.inner.Open(ctx)
-}
-
-func (p *wrappedPipeline) Read(ctx context.Context) (arrow.RecordBatch, error) {
-	return p.inner.Read(ctx)
-}
-
-// Close closes the resources of the pipeline.
-func (p *wrappedPipeline) Close() {
-	p.inner.Close()
-	p.onClose()
+	wf.capture.Merge(wf.parentRegion, capture)
 }

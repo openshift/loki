@@ -40,6 +40,7 @@ import (
 	"github.com/grafana/loki/v3/pkg/analytics"
 	"github.com/grafana/loki/v3/pkg/compactor/retention"
 	"github.com/grafana/loki/v3/pkg/distributor/clientpool"
+	"github.com/grafana/loki/v3/pkg/distributor/rendezvous"
 	"github.com/grafana/loki/v3/pkg/distributor/shardstreams"
 	"github.com/grafana/loki/v3/pkg/distributor/writefailures"
 	"github.com/grafana/loki/v3/pkg/ingester"
@@ -55,7 +56,6 @@ import (
 	"github.com/grafana/loki/v3/pkg/util"
 	"github.com/grafana/loki/v3/pkg/util/constants"
 	util_log "github.com/grafana/loki/v3/pkg/util/log"
-	util_metric "github.com/grafana/loki/v3/pkg/util/metric"
 	lokiring "github.com/grafana/loki/v3/pkg/util/ring"
 	"github.com/grafana/loki/v3/pkg/validation"
 )
@@ -113,8 +113,6 @@ type Config struct {
 	KafkaConfig kafka.Config `yaml:"-"`
 
 	DataObjTeeConfig DataObjTeeConfig `yaml:"dataobj_tee"`
-
-	InMemoryPushTimeout time.Duration `yaml:"inmemory_dataobj_push_timeout"`
 }
 
 // RegisterFlags registers distributor-related flags.
@@ -131,20 +129,18 @@ func (cfg *Config) RegisterFlags(fs *flag.FlagSet) {
 	fs.BoolVar(&cfg.IngesterEnabled, "distributor.ingester-writes-enabled", true, "Enable writes to Ingesters during Push requests. Defaults to true.")
 	fs.BoolVar(&cfg.IngestLimitsEnabled, "distributor.ingest-limits-enabled", false, "Enable checking limits against the ingest-limits service. Defaults to false.")
 	fs.BoolVar(&cfg.IngestLimitsDryRunEnabled, "distributor.ingest-limits-dry-run-enabled", false, "Enable dry-run mode where limits are checked the ingest-limits service, but not enforced. Defaults to false.")
-	fs.DurationVar(&cfg.InMemoryPushTimeout, "distributor.inmemory-dataobj-push-timeout", 5*time.Second,
-		"Timeout for sending a record to the in-memory queue before returning backpressure to the caller. Defaults to 5s. Set to 0 for no timeout.")
 }
 
 func (cfg *Config) Validate() error {
+	if !cfg.KafkaEnabled && !cfg.IngesterEnabled {
+		return fmt.Errorf("at least one of kafka and ingestor writes must be enabled")
+	}
 	if err := cfg.DataObjTeeConfig.Validate(); err != nil {
 		return err
 	}
 	// Set default maxDecompressedSize if not configured (50x maxRecvMsgSize)
 	if cfg.MaxDecompressedSize == 0 && cfg.MaxRecvMsgSize > 0 {
 		cfg.MaxDecompressedSize = int64(cfg.MaxRecvMsgSize) * 50
-	}
-	if cfg.InMemoryPushTimeout < 0 {
-		return errors.New("distributor.inmemory-dataobj-push-timeout must be >= 0")
 	}
 	return nil
 }
@@ -220,8 +216,9 @@ type Distributor struct {
 	// are consumed.
 	numMetadataPartitions int
 
-	// Track the maximum number of inflight bytes in the last 1 minute.
-	inflightBytes *util_metric.MaxSampleCollector
+	// Track the max inflight bytes in the last 1 minute.
+	inflightBytesHighWatermark prometheus.Summary
+	inflightBytes              atomic.Int64
 
 	// kafka metrics
 	kafkaAppends           *prometheus.CounterVec
@@ -247,6 +244,8 @@ func New(
 	limitsFrontendRing ring.ReadRing,
 	numMetadataPartitions int,
 	dataObjConsumerPartitionRing ring.PartitionRingReader,
+	dataObjConsumerPartitionKVClient kv.Client,
+	dataObjConsumerPartitionRingKey string,
 	logger log.Logger,
 ) (*Distributor, error) {
 	ingesterClientFactory := cfg.factory
@@ -313,9 +312,20 @@ func New(
 		)
 
 		if cfg.DataObjTeeConfig.Enabled {
+			var rendezvousPartitionWatcher *rendezvous.PartitionRingWatcher
+			if cfg.DataObjTeeConfig.UseRendezvousHashing {
+				rendezvousPartitionWatcher = rendezvous.New(
+					rendezvous.Config{Key: dataObjConsumerPartitionRingKey},
+					dataObjConsumerPartitionKVClient,
+					logger,
+				)
+				servs = append(servs, rendezvousPartitionWatcher)
+			}
 			resolver := newSegmentationPartitionResolver(
 				uint64(cfg.DataObjTeeConfig.PerPartitionRateBytes),
+				cfg.DataObjTeeConfig.UseRendezvousHashing,
 				dataObjConsumerPartitionRing,
+				rendezvousPartitionWatcher,
 				registerer,
 				logger,
 			)
@@ -411,10 +421,12 @@ func New(
 		partitionRing:         partitionRing,
 		ingestLimits:          ingestLimits,
 		numMetadataPartitions: numMetadataPartitions,
-		inflightBytes: util_metric.NewMaxSampleCollector(
-			"loki_distributor_max_inflight_bytes",
-			"The maximum number of inflight bytes in the last 1 minute.",
-		),
+		inflightBytesHighWatermark: promauto.With(registerer).NewSummary(prometheus.SummaryOpts{
+			Name:       "loki_distributor_inflight_bytes_high_watermark",
+			Help:       "The max inflight bytes in the last 1 minute.",
+			Objectives: map[float64]float64{1.0: 0.1},
+			MaxAge:     time.Minute,
+		}),
 	}
 
 	if overrides.IngestionRateStrategy() == validation.GlobalIngestionRateStrategy {
@@ -455,8 +467,6 @@ func New(
 	)
 	d.rateStore = rs
 
-	_ = registerer.Register(d.inflightBytes)
-	servs = append(servs, d.inflightBytes)
 	servs = append(servs, d.ingesterClients, rs)
 	d.subservices, err = services.NewManager(servs...)
 	if err != nil {
@@ -566,11 +576,12 @@ func (d *Distributor) Push(ctx context.Context, req *logproto.PushRequest) (*log
 }
 
 // Push a set of streams.
+// Can modify the input req parameter.
 // The returned error is the last one seen.
 func (d *Distributor) PushWithResolver(ctx context.Context, req *logproto.PushRequest, streamResolver *requestScopedStreamResolver, format string) (*logproto.PushResponse, error) {
 	requestSize := int64(req.Size())
-	d.inflightBytes.Inc(requestSize)
-	defer d.inflightBytes.Inc(-requestSize)
+	d.inflightBytesHighWatermark.Observe(float64(d.inflightBytes.Add(requestSize)))
+	defer d.inflightBytes.Add(-requestSize)
 
 	tenantID, err := tenant.TenantID(ctx)
 	if err != nil {
@@ -845,7 +856,9 @@ func (d *Distributor) PushWithResolver(ctx context.Context, req *logproto.PushRe
 		streamsToWrite += len(streams)
 	}
 	if d.cfg.KafkaEnabled {
-		streamsToWrite += len(streams)
+		// When Kafka is enabled, we track just one stream, instead of len(streams),
+		// as all streams are written to Kafka at once.
+		streamsToWrite++
 	}
 
 	// We must correctly set streamsPending before beginning any writes to ensure we don't have a race between finishing all of one path before starting the other.
@@ -874,7 +887,7 @@ func (d *Distributor) PushWithResolver(ctx context.Context, req *logproto.PushRe
 			}
 		}
 		// We don't need to create a new context like the ingester writes, because we don't return unless all writes have succeeded.
-		d.sendStreamsToKafka(ctx, streams, tenantID, &tracker, subring)
+		go d.sendStreamsToKafka(ctx, tenantID, streams, &tracker, subring)
 	}
 
 	if d.cfg.IngesterEnabled {
@@ -1212,8 +1225,22 @@ func (d *Distributor) truncateLines(vContext validationContext, stream *logproto
 		}
 	}
 
-	validation.MutatedSamples.WithLabelValues(validation.LineTooLong, vContext.userID).Add(float64(truncatedSamples))
-	validation.MutatedBytes.WithLabelValues(validation.LineTooLong, vContext.userID).Add(float64(truncatedBytes))
+	if truncatedSamples > 0 {
+		validation.MutatedSamples.WithLabelValues(validation.LineTooLong, vContext.userID).Add(float64(truncatedSamples))
+		validation.MutatedBytes.WithLabelValues(validation.LineTooLong, vContext.userID).Add(float64(truncatedBytes))
+
+		// Emit a log line so operators can confirm which streams are being
+		// truncated when max_line_size_truncate is enabled, complementing the
+		// mutated_samples_total / mutated_bytes_total metrics.
+		level.Debug(d.logger).Log(
+			"msg", "truncated log lines exceeding max_line_size",
+			"tenant", vContext.userID,
+			"stream", stream.Labels,
+			"max_line_size", vContext.maxLineSize,
+			"truncated_lines", truncatedSamples,
+			"truncated_bytes", truncatedBytes,
+		)
+	}
 }
 
 type pushIngesterTask struct {
@@ -1292,66 +1319,71 @@ func (d *Distributor) sendStreamsErr(ctx context.Context, ingester ring.Instance
 	return err
 }
 
-func (d *Distributor) sendStreamsToKafka(ctx context.Context, streams []KeyedStream, tenant string, tracker *PushTracker, subring *ring.PartitionRing) {
-	for _, s := range streams {
-		go func(s KeyedStream) {
-			err := d.sendStreamToKafka(ctx, s, tenant, subring)
-			if err != nil {
-				err = fmt.Errorf("failed to write stream to kafka: %w", err)
-			}
-			tracker.doneWithResult(err)
-		}(s)
-	}
-}
-
-func (d *Distributor) sendStreamToKafka(ctx context.Context, stream KeyedStream, tenant string, subring *ring.PartitionRing) error {
-	if len(stream.Stream.Entries) == 0 {
-		return nil
-	}
-
-	// The distributor writes stream records to one of the active partitions
-	// in the partition ring. The number of active partitions is equal to the
-	// number of ingesters.
-	streamPartitionID, err := subring.ActivePartitionForKey(stream.HashKey)
+// sendStreamsToKafka sends all streams to Kafka or returns an error.
+func (d *Distributor) sendStreamsToKafka(ctx context.Context, tenant string, streams []KeyedStream, tracker *PushTracker, subring *ring.PartitionRing) {
+	records, err := d.recordsForStreams(tenant, streams, subring)
 	if err != nil {
-		d.kafkaAppends.WithLabelValues("kafka", "fail").Inc()
-		return fmt.Errorf("failed to find active partition for stream: %w", err)
+		// We need to add len(streams) to the counter as we later count successes and
+		// failures per stream too.
+		d.kafkaAppends.WithLabelValues("kafka", "fail").Add(float64(len(streams)))
+		tracker.doneWithResult(err)
+		return
 	}
-	startTime := time.Now()
-	records, err := kafka.Encode(
-		streamPartitionID,
-		tenant,
-		stream.Stream,
-		d.cfg.KafkaConfig.ProducerMaxRecordSizeBytes,
-	)
-	if err != nil {
-		d.kafkaAppends.WithLabelValues(
-			fmt.Sprintf("partition_%d", streamPartitionID),
-			"fail",
-		).Inc()
-		return fmt.Errorf("failed to marshal write request to records: %w", err)
+	// TODO(grobinson): Check if this is needed, as I would have expected
+	// streams without entries to have been removed when the request was
+	// validated.
+	if len(records) == 0 {
+		tracker.doneWithResult(nil)
+		return
 	}
-
 	d.kafkaRecordsPerRequest.Observe(float64(len(records)))
-
-	produceResults := d.kafkaWriter.ProduceSync(ctx, records)
-
-	if count, sizeBytes := successfulProduceRecordsStats(produceResults); count > 0 {
-		d.kafkaWriteLatency.Observe(time.Since(startTime).Seconds())
+	// Produce the records to Kafka.
+	writeLatency := prometheus.NewTimer(d.kafkaWriteLatency)
+	results := d.kafkaWriter.ProduceSync(ctx, records)
+	if count, sizeBytes := successfulProduceRecordsStats(results); count > 0 {
+		// TODO(grobinson): We should emit the write latency even when we failed.
+		// This has been kept as-is for now to preserve behavior.
+		writeLatency.ObserveDuration()
 		d.kafkaWriteBytesTotal.Add(float64(sizeBytes))
 	}
-
 	var finalErr error
-	for _, result := range produceResults {
+	for _, result := range results {
 		if result.Err != nil {
-			d.kafkaAppends.WithLabelValues(fmt.Sprintf("partition_%d", streamPartitionID), "fail").Inc()
+			d.kafkaAppends.WithLabelValues(fmt.Sprintf("partition_%d", result.Record.Partition), "fail").Inc()
 			finalErr = result.Err
 		} else {
-			d.kafkaAppends.WithLabelValues(fmt.Sprintf("partition_%d", streamPartitionID), "success").Inc()
+			d.kafkaAppends.WithLabelValues(fmt.Sprintf("partition_%d", result.Record.Partition), "success").Inc()
 		}
 	}
+	tracker.doneWithResult(finalErr)
+}
 
-	return finalErr
+// recordsForStreams returns the Kafka records for the tenant's streams.
+// It splits large streams into multiple Kafka records where a stream would
+// exceed the maximum record size.
+func (d *Distributor) recordsForStreams(
+	tenant string,
+	streams []KeyedStream,
+	subring *ring.PartitionRing,
+) ([]*kgo.Record, error) {
+	records := make([]*kgo.Record, 0, len(streams))
+	for _, stream := range streams {
+		// TODO(grobinson): Check if this is still needed, I would have expected
+		// streams with no entries to have be removed when the request was validated.
+		if len(stream.Stream.Entries) == 0 {
+			continue
+		}
+		partition, err := subring.ActivePartitionForKey(stream.HashKey)
+		if err != nil {
+			return nil, fmt.Errorf("failed to find partition for stream: %w", err)
+		}
+		streamRecords, err := kafka.Encode(partition, tenant, stream.Stream, d.cfg.KafkaConfig.ProducerMaxRecordSizeBytes)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal streams to records: %w", err)
+		}
+		records = append(records, streamRecords...)
+	}
+	return records, nil
 }
 
 func successfulProduceRecordsStats(results kgo.ProduceResults) (count, sizeBytes int) {

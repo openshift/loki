@@ -468,7 +468,7 @@ The logfmt parser also supports the following flags:
     ```
 
     Without the `--strict` flag the parser skips invalid key/value pairs and continues parsing the rest of the log line.
-    Non-strict mode offers the flexibility to parse semi-structed log lines, though note that this is only best-effort.
+    Non-strict mode offers the flexibility to parse semi-structured log lines, though note that this is only best-effort.
 
 - `--keep-empty` to retain standalone keys with empty value
 
@@ -545,14 +545,14 @@ The regular expression must contain a least one named sub-match (e.g `(?P<name>r
 For example the parser `| regexp "(?P<method>\\w+) (?P<path>[\\w|/]+) \\((?P<status>\\d+?)\\) (?P<duration>.*)"` will extract from the following line:
 
 ```log
-POST /api/prom/api/v1/query_range (200) 1.5s
+POST /loki/api/v1/query_range (200) 1.5s
 ```
 
 those labels:
 
 ```kv
 "method" => "POST"
-"path" => "/api/prom/api/v1/query_range"
+"path" => "/loki/api/v1/query_range"
 "status" => "200"
 "duration" => "1.5s"
 ```

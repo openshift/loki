@@ -38,11 +38,6 @@ const (
 	// StreamRateLimit is a reason for discarding lines when the streams own rate limit is hit
 	// rather than the overall ingestion rate limit.
 	StreamRateLimit = "per_stream_rate_limit"
-	// OutOfOrder is a reason for discarding lines when Loki doesn't accept out
-	// of order log lines (parameter `-ingester.unordered-writes` is set to
-	// `false`) and the lines in question are older than the newest line in the
-	// stream.
-	OutOfOrder = "out_of_order"
 	// TooFarBehind is a reason for discarding lines when Loki accepts
 	// unordered ingest  (parameter `-ingester.unordered-writes` is set to
 	// `true`, which is the default) and the lines in question are older than
@@ -94,24 +89,24 @@ func (e *ErrStreamRateLimit) Error() string {
 		e.Bytes.String())
 }
 
-// MutatedSamples is a metric of the total number of lines mutated, by reason.
+// MutatedSamples is a metric of the total number of lines mutated, by reason and tenant.
 var MutatedSamples = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: constants.Loki,
 		Name:      "mutated_samples_total",
 		Help:      "The total number of samples that have been mutated.",
 	},
-	[]string{ReasonLabel, "truncated"},
+	[]string{ReasonLabel, "tenant"},
 )
 
-// MutatedBytes is a metric of the total mutated bytes, by reason.
+// MutatedBytes is a metric of the total mutated bytes, by reason and tenant.
 var MutatedBytes = promauto.NewCounterVec(
 	prometheus.CounterOpts{
 		Namespace: constants.Loki,
 		Name:      "mutated_bytes_total",
 		Help:      "The total number of bytes that have been mutated.",
 	},
-	[]string{ReasonLabel, "truncated"},
+	[]string{ReasonLabel, "tenant"},
 )
 
 // DiscardedBytes is a metric of the total discarded bytes, by reason.
