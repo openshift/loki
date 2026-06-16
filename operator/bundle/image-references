@@ -19,3 +19,7 @@ spec:
     from:
       kind: DockerImage
       name: quay.io/openshift-logging/loki-operator:0.1.0
+  - name: loki-rhel9-operator
+    from:
+      kind: DockerImage
+      name: quay.io/openshift-logging/passthrough-gateway:latest
