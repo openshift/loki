@@ -6,7 +6,7 @@ spec:
   - name: logging-loki-rhel9
     from:
       kind: DockerImage
-      name: quay.io/openshift-logging/loki:v3.7.2
+      name: quay.io/openshift-logging/loki:v3.7.3
   - name: lokistack-gateway-rhel9
     from:
       kind: DockerImage
