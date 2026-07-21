@@ -1,6 +1,6 @@
 module github.com/grafana/loki/operator
 
-go 1.26.4
+go 1.25.7
 
 require (
 	github.com/ViaQ/logerr/v2 v2.1.0
@@ -8,7 +8,7 @@ require (
 	github.com/google/go-cmp v0.7.0
 	github.com/google/uuid v1.6.0
 	github.com/grafana/loki/operator/api/loki v0.0.0-00010101000000-000000000000
-	github.com/grafana/loki/v3 v3.7.3
+	github.com/grafana/loki/v3 v3.7.1
 	github.com/imdario/mergo v0.3.16
 	github.com/maxbrunsfeld/counterfeiter/v6 v6.11.2
 	github.com/openshift/api v0.0.0-20250305013520-e7f23be12279 // release-4.18
