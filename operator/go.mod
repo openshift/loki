@@ -207,3 +207,8 @@ require (
 )
 
 replace github.com/grafana/loki/operator/api/loki => ./api/loki
+
+// Replace memberlist with Grafana's fork which includes some fixes that haven't been
+// merged upstream yet.
+// See: https://github.com/grafana/loki/blob/main/go.mod#L477-L479
+replace github.com/hashicorp/memberlist => github.com/grafana/memberlist v0.3.1-0.20251126142931-6f9f62ab6f86
