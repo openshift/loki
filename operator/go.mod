@@ -2,6 +2,8 @@ module github.com/grafana/loki/operator
 
 go 1.25.7
 
+toolchain go1.26.5
+
 require (
 	dario.cat/mergo v1.0.2
 	github.com/ViaQ/logerr/v2 v2.1.0
