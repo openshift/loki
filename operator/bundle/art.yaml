@@ -4,6 +4,6 @@ updates:
 - file: "openshift/manifests/loki-operator.clusterserviceversion.yaml"
   update_list:
   - search: "0.1.0"
-    replace: "6.0.16"
+    replace: "6.0.17"
   - search: "olm.skipRange: '>=5.8.0-0 <6.0.0'"
-    replace: "olm.skipRange: '>=5.8.0-0 <6.0.16'"
+    replace: "olm.skipRange: '>=5.8.0-0 <6.0.17'"
