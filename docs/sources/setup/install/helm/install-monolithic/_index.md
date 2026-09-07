@@ -21,12 +21,13 @@ With the move to the Grafana-community repository, the chart numbering has chang
 {{< /admonition >}}
 
 {{< admonition type="note" >}}
-As of the community Helm chart version 12.0.0, `SingleBinary` has been renamed to `Monolithic`. If you are using `SingleBinary` deployment mode, you have to explicitly set `deploymentMode: Monolithic` in your values file to avoid breaking changes.
+As of community chart 12.0.0, `SingleBinary` was renamed to `Monolithic`. Set `deploymentMode: Monolithic` explicitly. The legacy value `SingleBinary` is still accepted but deprecated.
 {{< /admonition >}}
 
 ## Prerequisites
 
 - Helm 3 or above. See [Installing Helm](https://helm.sh/docs/intro/install/).
+- Kubernetes 1.25 or later.
 - A running Kubernetes cluster.
 
 ## Single Replica or Multiple Replicas
@@ -77,7 +78,7 @@ loki:
   limits_config:
     allow_structured_metadata: true
     volume_enabled: true
-  ruler:
+  rulerConfig:
     enable_api: true
 
 ignoreMinioDeprecation: true  # Temporary workaround – MinIO will be removed 2026-10-31
@@ -160,7 +161,7 @@ loki:
   limits_config:
     allow_structured_metadata: true
     volume_enabled: true
-  ruler:
+  rulerConfig:
     enable_api: true
 
 ignoreMinioDeprecation: true  # Temporary workaround – MinIO will be removed 2026-10-31
@@ -225,20 +226,20 @@ If this is the first time you have deployed the Loki Helm chart since the move t
 1. Deploy Loki using the configuration file `values.yaml`:
 
    ```bash
-    helm install loki grafana-community/loki -f values.yaml
+    helm install loki grafana-community/loki -f values.yaml -n loki --create-namespace
     ```
 
 1. Install or upgrade the Loki deployment.
      - To install:
 
         ```bash
-       helm install --values values.yaml loki grafana-community/loki
+       helm install --values values.yaml loki grafana-community/loki -n loki --create-namespace
        ```
 
      - To upgrade:
 
        ```bash
-       helm upgrade --values values.yaml loki grafana-community/loki
+       helm upgrade --values values.yaml loki grafana-community/loki -n loki
        ```
 
 1. Verify that Loki is running:
@@ -250,6 +251,10 @@ If this is the first time you have deployed the Loki Helm chart since the move t
 ## Object Storage Configuration
 
 After testing Loki with MinIO, we recommend configuring Loki with an object storage provider. The following examples shows how to configure Loki with different object storage providers:
+
+{{< admonition type="note" >}}
+As of chart 18.3.0, `singleBinary.persistence.enableStatefulSetAutoDeletePVC` defaults to `false` (it defaulted to `true` before). This means the persistent volume claims (PVCs) for the single binary StatefulSet are retained, not automatically deleted, when the StatefulSet is deleted or scaled down. Set `singleBinary.persistence.enableStatefulSetAutoDeletePVC: true` in your values file to restore the old auto-delete behavior.
+{{< /admonition >}}
 
 {{< admonition type="caution" >}}
 When deploying Loki using S3 Storage **DO NOT** use the default bucket names;  `chunk`, `ruler` and `admin`. Choose a unique name for each bucket. For more information see the following [security update](https://grafana.com/blog/2024/06/27/grafana-security-update-grafana-loki-and-unintended-data-write-attempts-to-amazon-s3-buckets/). This caution does not apply when you are using MinIO. When using MinIO we recommend using the default bucket names.
@@ -403,7 +408,7 @@ deploymentMode: Monolithic
 singleBinary:
   replicas: 3
   persistence:
-    storageClass: gp2
+    storageClass: managed-csi
     accessModes:
       - ReadWriteOnce
     size: 30Gi
@@ -456,4 +461,4 @@ We recommend running Loki at scale within a cloud environment like AWS, Azure, o
 ## Next Steps
 
 * Configure an agent to [send log data to Loki](/docs/loki/<LOKI_VERSION>/send-data/).
-* Monitor the Loki deployment using the [Meta Monitoring Helm chart](/docs/loki/<LOKI_VERSION>/setup/install/helm/monitor-and-alert/)
+* [Monitor the Loki deployment](/docs/loki/<LOKI_VERSION>/setup/install/helm/monitor-and-alert/), using the recommended Kubernetes monitoring Helm chart.

@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"os"
 	rt "runtime"
+	"strings"
 	"time"
 
 	"github.com/fatih/color"
@@ -89,6 +90,7 @@ type Config struct {
 	Target       flagext.StringSliceCSV `yaml:"target,omitempty"`
 	AuthEnabled  bool                   `yaml:"auth_enabled,omitempty"`
 	LBAC         labelaccess.Config     `yaml:"lbac,omitempty" category:"experimental"`
+	NoAuthTenant string                 `yaml:"no_auth_tenant,omitempty"`
 	HTTPPrefix   string                 `yaml:"http_prefix" doc:"hidden"`
 	BallastBytes int                    `yaml:"ballast_bytes"`
 
@@ -157,7 +159,12 @@ func (c *Config) RegisterFlags(f *flag.FlagSet) {
 	)
 	f.BoolVar(&c.AuthEnabled, "auth.enabled", true,
 		"Enables authentication through the X-Scope-OrgID header, which must be present if true. "+
-			"If false, the OrgID will always be set to 'fake'.",
+			"If false, the OrgID will always be set to the value of -auth.no-auth-tenant.",
+	)
+	f.StringVar(&c.NoAuthTenant, "auth.no-auth-tenant", "fake",
+		"Tenant ID to use when auth is disabled. Defaults to 'fake' for backwards compatibility. "+
+			"Safe to change on a fresh cluster; on an existing cluster, data stored under the old "+
+			"tenant path must be migrated first (see cmd/migrate).",
 	)
 	c.LBAC.RegisterFlags(f)
 	f.IntVar(&c.BallastBytes, "config.ballast-bytes", 0,
@@ -356,6 +363,9 @@ func (c *Config) Validate() error {
 	if err := c.Distributor.Validate(); err != nil {
 		errs = append(errs, errors.Wrap(err, "CONFIG ERROR: invalid distributor config"))
 	}
+	if err := c.validateNoAuthTenant(); err != nil {
+		errs = append(errs, err)
+	}
 
 	errs = append(errs, validateSchemaValues(c)...)
 	errs = append(errs, ValidateConfigCompatibility(*c)...)
@@ -375,6 +385,13 @@ func (c *Config) Validate() error {
 
 func (c *Config) isTarget(m string) bool {
 	return util.StringsContain(c.Target, m)
+}
+
+func (c *Config) validateNoAuthTenant() error {
+	if !c.AuthEnabled && strings.TrimSpace(c.NoAuthTenant) == "" {
+		return errors.New("CONFIG ERROR: no_auth_tenant cannot be empty when auth_enabled is false")
+	}
+	return nil
 }
 
 type Frontend interface {
@@ -418,6 +435,7 @@ type Loki struct {
 	frontend                            Frontend
 	ruler                               *base_ruler.Ruler
 	ruleEvaluator                       ruler.Evaluator
+	RulerEvaluatorWrapper               func(ruler.Evaluator) ruler.Evaluator
 	RulerStorage                        rulestore.RuleStore
 	rulerAPI                            *base_ruler.API
 	stopper                             queryrange.Stopper
@@ -447,7 +465,6 @@ type Loki struct {
 	deleteClientMetrics *deletion.DeleteRequestClientMetrics
 
 	Tee                distributor.Tee
-	PushParserWrapper  push.RequestParserWrapper
 	HTTPAuthMiddleware middleware.Interface
 
 	Codec   codec.Codec
@@ -480,6 +497,9 @@ func New(cfg Config) (*Loki, error) {
 }
 
 func (t *Loki) setupAuthMiddleware() {
+	if !t.Cfg.AuthEnabled {
+		level.Info(util_log.Logger).Log("msg", "auth disabled", "no_auth_tenant", t.Cfg.NoAuthTenant)
+	}
 	t.HTTPAuthMiddleware = fakeauth.SetupAuthMiddleware(&t.Cfg.Server, t.Cfg.AuthEnabled,
 		// Also don't check auth for these gRPC methods, since single call is used for multiple users (or no user like health check).
 		[]string{
@@ -492,7 +512,9 @@ func (t *Loki) setupAuthMiddleware() {
 			"/schedulerpb.SchedulerForQuerier/QuerierLoop",
 			"/schedulerpb.SchedulerForQuerier/NotifyQuerierShutdown",
 			"/grpc.JobQueue/Loop",
-		})
+		},
+		t.Cfg.NoAuthTenant,
+	)
 }
 
 func (t *Loki) setupGRPCRecoveryMiddleware() {
@@ -761,9 +783,6 @@ func (t *Loki) setupModuleManager() error {
 	mm.RegisterModule(IngesterGRPCInterceptors, t.initIngesterGRPCInterceptors, modules.UserInvisibleModule)
 	mm.RegisterModule(QueryFrontendTripperware, t.initQueryFrontendMiddleware, modules.UserInvisibleModule)
 	mm.RegisterModule(QueryFrontend, t.initQueryFrontend)
-	mm.RegisterModule(QueryEngine, t.initV2QueryEngine)
-	mm.RegisterModule(QueryEngineScheduler, t.initV2QueryEngineScheduler)
-	mm.RegisterModule(QueryEngineWorker, t.initV2QueryEngineWorker)
 	mm.RegisterModule(RulerStorage, t.initRulerStorage, modules.UserInvisibleModule)
 	mm.RegisterModule(Ruler, t.initRuler)
 	mm.RegisterModule(RuleEvaluator, t.initRuleEvaluator, modules.UserInvisibleModule)
@@ -784,16 +803,22 @@ func (t *Loki) setupModuleManager() error {
 	mm.RegisterModule(PatternIngesterTee, t.initPatternIngesterTee, modules.UserInvisibleModule)
 	mm.RegisterModule(PatternIngester, t.initPatternIngester)
 	mm.RegisterModule(PartitionRing, t.initPartitionRing, modules.UserInvisibleModule)
-	mm.RegisterModule(DataObjExplorer, t.initDataObjExplorer)
-	mm.RegisterModule(UIRing, t.initUIRing, modules.UserInvisibleModule)
+
 	mm.RegisterModule(UI, t.initUI)
-	mm.RegisterModule(DataObjConsumerRing, t.initDataObjConsumerRing)
-	mm.RegisterModule(DataObjConsumerPartitionRing, t.initDataObjConsumerPartitionRing)
-	mm.RegisterModule(DataObjConsumer, t.initDataObjConsumer)
-	mm.RegisterModule(DataObjIndexBuilder, t.initDataObjIndexBuilder)
-	mm.RegisterModule(DataObjCompactionPlanner, t.initDataObjCompactionPlanner)
-	mm.RegisterModule(DataObjCompactionWorker, t.initDataObjCompactionWorker)
-	mm.RegisterModule(ScratchStore, t.initScratchStore)
+	mm.RegisterModule(UIRing, t.initUIRing, modules.UserInvisibleModule)
+
+	// Thor related modules: keep targets invisible
+	mm.RegisterModule(DataObjConsumer, t.initDataObjConsumer, modules.UserInvisibleTargetableModule)
+	mm.RegisterModule(DataObjConsumerRing, t.initDataObjConsumerRing, modules.UserInvisibleModule)
+	mm.RegisterModule(DataObjConsumerPartitionRing, t.initDataObjConsumerPartitionRing, modules.UserInvisibleModule)
+	mm.RegisterModule(DataObjIndexBuilder, t.initDataObjIndexBuilder, modules.UserInvisibleTargetableModule)
+	mm.RegisterModule(DataObjCompactionPlanner, t.initDataObjCompactionPlanner, modules.UserInvisibleTargetableModule)
+	mm.RegisterModule(DataObjCompactionWorker, t.initDataObjCompactionWorker, modules.UserInvisibleTargetableModule)
+	mm.RegisterModule(DataObjExplorer, t.initDataObjExplorer, modules.UserInvisibleTargetableModule)
+	mm.RegisterModule(QueryEngine, t.initV2QueryEngine, modules.UserInvisibleTargetableModule)
+	mm.RegisterModule(QueryEngineScheduler, t.initV2QueryEngineScheduler, modules.UserInvisibleTargetableModule)
+	mm.RegisterModule(QueryEngineWorker, t.initV2QueryEngineWorker, modules.UserInvisibleTargetableModule)
+	mm.RegisterModule(ScratchStore, t.initScratchStore, modules.UserInvisibleModule)
 
 	mm.RegisterModule(All, nil)
 
@@ -804,7 +829,7 @@ func (t *Loki) setupModuleManager() error {
 		Overrides:                    {RuntimeConfig},
 		OverridesExporter:            {Overrides, Server, UIRing},
 		TenantConfigs:                {RuntimeConfig},
-		UI:                           {Server, MemberlistKV, UIRing},
+		UI:                           {UIRing},
 		UIRing:                       {Server, MemberlistKV},
 		Distributor:                  {Ring, Server, Overrides, TenantConfigs, PatternRingClient, PatternIngesterTee, Analytics, PartitionRing, DataObjConsumerRing, DataObjConsumerPartitionRing, IngestLimitsFrontendRing, UIRing},
 		IngestLimitsRing:             {RuntimeConfig, Server, MemberlistKV},
@@ -839,13 +864,13 @@ func (t *Loki) setupModuleManager() error {
 		DataObjExplorer:              {Server, UIRing},
 		DataObjConsumerRing:          {RuntimeConfig, Server, MemberlistKV},
 		DataObjConsumerPartitionRing: {MemberlistKV, Server, Ring},
-		DataObjConsumer:              {MemberlistKV, ScratchStore, PartitionRing, Server, UI, Overrides},
+		DataObjConsumer:              {MemberlistKV, ScratchStore, PartitionRing, Server, UIRing, Overrides},
 		DataObjIndexBuilder:          {ScratchStore, Server, UIRing},
-		DataObjCompactionPlanner:     {Server, UIRing},
+		DataObjCompactionPlanner:     {Server, UIRing, Overrides},
 		DataObjCompactionWorker:      {ScratchStore, Server, UIRing},
 		ScratchStore:                 {},
 
-		All: {QueryScheduler, QueryFrontend, Querier, Ingester, PatternIngester, Distributor, Ruler, Compactor, UI},
+		All: {QueryScheduler, QueryFrontend, Querier, Ingester, PatternIngester, Distributor, Ruler, Compactor},
 	}
 
 	if t.Cfg.IngestLimits.Enabled {

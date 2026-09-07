@@ -2,16 +2,33 @@ package postings
 
 import (
 	"bytes"
+	"cmp"
 
 	"github.com/apache/arrow-go/v18/arrow"
 	"github.com/apache/arrow-go/v18/arrow/array"
 )
+
+// CompareRows defines the physical row order of a postings section and the
+// merge order across sections. It reports whether row [a] sorts before (<0),
+// after (>0), or equal to (0) row [b].
+func CompareRows(a, b Row) int {
+	return cmp.Or(
+		cmp.Compare(a.Kind, b.Kind),
+		cmp.Compare(a.ColumnName, b.ColumnName),
+		cmp.Compare(a.LabelValue, b.LabelValue),
+		cmp.Compare(a.MinTimestamp, b.MinTimestamp),
+		cmp.Compare(a.MaxTimestamp, b.MaxTimestamp),
+		cmp.Compare(a.ObjectPath, b.ObjectPath),
+		cmp.Compare(a.SectionIndex, b.SectionIndex),
+	)
+}
 
 // Row is the decoded per-row representation of a postings section,
 // covering both Label and Bloom kinds.
 type Row struct {
 	Kind             PostingKind // KindLabel or KindBloom
 	ObjectPath       string
+	ShardBuckets     int64
 	SectionIndex     int64
 	ColumnName       string
 	LabelValue       string // empty for KindBloom rows
@@ -20,6 +37,8 @@ type Row struct {
 	UncompressedSize int64
 	MinTimestamp     int64 // unix nanos
 	MaxTimestamp     int64 // unix nanos
+	MinShardBucket   uint32
+	MaxShardBucket   uint32
 }
 
 // LabelEntry converts the Row to a [LabelEntry]. The caller should only call
@@ -27,6 +46,7 @@ type Row struct {
 func (r Row) LabelEntry() LabelEntry {
 	return LabelEntry{
 		ObjectPath:       r.ObjectPath,
+		ShardBuckets:     r.ShardBuckets,
 		SectionIndex:     r.SectionIndex,
 		ColumnName:       r.ColumnName,
 		LabelValue:       r.LabelValue,
@@ -34,6 +54,8 @@ func (r Row) LabelEntry() LabelEntry {
 		MinTimestamp:     r.MinTimestamp,
 		MaxTimestamp:     r.MaxTimestamp,
 		UncompressedSize: r.UncompressedSize,
+		MinShardBucket:   r.MinShardBucket,
+		MaxShardBucket:   r.MaxShardBucket,
 	}
 }
 
@@ -42,6 +64,7 @@ func (r Row) LabelEntry() LabelEntry {
 func (r Row) BloomEntry() BloomEntry {
 	return BloomEntry{
 		ObjectPath:       r.ObjectPath,
+		ShardBuckets:     r.ShardBuckets,
 		SectionIndex:     r.SectionIndex,
 		ColumnName:       r.ColumnName,
 		BloomFilter:      r.BloomFilter,
@@ -49,6 +72,42 @@ func (r Row) BloomEntry() BloomEntry {
 		MinTimestamp:     r.MinTimestamp,
 		MaxTimestamp:     r.MaxTimestamp,
 		UncompressedSize: r.UncompressedSize,
+	}
+}
+
+// Row converts the LabelEntry to a [Row] with Kind set to [KindLabel]. It is
+// the inverse of [Row.LabelEntry].
+func (e LabelEntry) Row() Row {
+	return Row{
+		Kind:             KindLabel,
+		ObjectPath:       e.ObjectPath,
+		ShardBuckets:     e.ShardBuckets,
+		SectionIndex:     e.SectionIndex,
+		ColumnName:       e.ColumnName,
+		LabelValue:       e.LabelValue,
+		StreamIDBitmap:   e.StreamIDBitmap,
+		MinTimestamp:     e.MinTimestamp,
+		MaxTimestamp:     e.MaxTimestamp,
+		UncompressedSize: e.UncompressedSize,
+		MinShardBucket:   e.MinShardBucket,
+		MaxShardBucket:   e.MaxShardBucket,
+	}
+}
+
+// Row converts the BloomEntry to a [Row] with Kind set to [KindBloom]. It is
+// the inverse of [Row.BloomEntry].
+func (e BloomEntry) Row() Row {
+	return Row{
+		Kind:             KindBloom,
+		ObjectPath:       e.ObjectPath,
+		ShardBuckets:     e.ShardBuckets,
+		SectionIndex:     e.SectionIndex,
+		ColumnName:       e.ColumnName,
+		BloomFilter:      e.BloomFilter,
+		StreamIDBitmap:   e.StreamIDBitmap,
+		MinTimestamp:     e.MinTimestamp,
+		MaxTimestamp:     e.MaxTimestamp,
+		UncompressedSize: e.UncompressedSize,
 	}
 }
 
@@ -91,6 +150,10 @@ func DecodeRow(batch arrow.RecordBatch, columns ColumnIndex, rowIndex int) Row {
 		result.ObjectPath = col.(*array.String).Value(rowIndex)
 	}
 
+	if col := getColumn("shard_buckets.int64"); col != nil && !col.IsNull(rowIndex) {
+		result.ShardBuckets = col.(*array.Int64).Value(rowIndex)
+	}
+
 	if col := getColumn("section_index.int64"); col != nil && !col.IsNull(rowIndex) {
 		result.SectionIndex = col.(*array.Int64).Value(rowIndex)
 	}
@@ -121,6 +184,14 @@ func DecodeRow(batch arrow.RecordBatch, columns ColumnIndex, rowIndex int) Row {
 
 	if col := getColumn("max_timestamp.timestamp"); col != nil && !col.IsNull(rowIndex) {
 		result.MaxTimestamp = int64(col.(*array.Timestamp).Value(rowIndex))
+	}
+
+	if col := getColumn("min_shard_bucket.int64"); col != nil && !col.IsNull(rowIndex) {
+		result.MinShardBucket = uint32(col.(*array.Int64).Value(rowIndex))
+	}
+
+	if col := getColumn("max_shard_bucket.int64"); col != nil && !col.IsNull(rowIndex) {
+		result.MaxShardBucket = uint32(col.(*array.Int64).Value(rowIndex))
 	}
 
 	return result

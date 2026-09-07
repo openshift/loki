@@ -31,6 +31,9 @@ type ReaderOptions struct {
 	// Allocator to use for allocating Arrow records. If nil,
 	// [memory.DefaultAllocator] is used.
 	Allocator memory.Allocator
+
+	// StatsTracker keeps track of the various reader internal stats.
+	StatsTracker dataset.RowReaderStatsTracker
 }
 
 // validate returns an error if opts is invalid. ReaderOptions are valid when
@@ -199,10 +202,11 @@ func (r *Reader) init(ctx context.Context) error {
 	}
 
 	innerOptions := dataset.RowReaderOptions{
-		Dataset:    dset,
-		Columns:    dset.Columns(),
-		Predicates: preds,
-		Prefetch:   true,
+		Dataset:           dset,
+		Columns:           dset.Columns(),
+		Predicates:        preds,
+		PrefetchAllOnOpen: true,
+		StatsTracker:      r.opts.StatsTracker,
 	}
 	if r.inner == nil {
 		r.inner = columnar.NewReaderAdapter(innerOptions)
@@ -256,6 +260,7 @@ var columnDatatypes = map[ColumnType]arrow.DataType{
 	ColumnTypeInvalid:          arrow.Null,
 	ColumnTypeKind:             arrow.PrimitiveTypes.Int64,
 	ColumnTypeObjectPath:       arrow.BinaryTypes.String,
+	ColumnTypeShardBuckets:     arrow.PrimitiveTypes.Int64,
 	ColumnTypeSectionIndex:     arrow.PrimitiveTypes.Int64,
 	ColumnTypeColumnName:       arrow.BinaryTypes.String,
 	ColumnTypeLabelValue:       arrow.BinaryTypes.String,
@@ -264,6 +269,8 @@ var columnDatatypes = map[ColumnType]arrow.DataType{
 	ColumnTypeUncompressedSize: arrow.PrimitiveTypes.Int64,
 	ColumnTypeMinTimestamp:     arrow.FixedWidthTypes.Timestamp_ns,
 	ColumnTypeMaxTimestamp:     arrow.FixedWidthTypes.Timestamp_ns,
+	ColumnTypeMinShardBucket:   arrow.PrimitiveTypes.Int64,
+	ColumnTypeMaxShardBucket:   arrow.PrimitiveTypes.Int64,
 }
 
 func columnToField(col *Column) arrow.Field {

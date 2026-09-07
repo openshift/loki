@@ -85,7 +85,25 @@ func bloomEntrySize(e BloomEntry) int {
 
 // labelEntrySize estimates the encoded size of one label entry.
 func labelEntrySize(e LabelEntry) int {
-	return 5*8 + len(e.ObjectPath) + len(e.ColumnName) + len(e.LabelValue) + len(e.StreamIDBitmap)
+	return 7*8 + len(e.ObjectPath) + len(e.ColumnName) + len(e.LabelValue) + len(e.StreamIDBitmap)
+}
+
+// trimTrailingZeros returns b with trailing zero bytes removed. Stream-ID
+// bitmaps are LSB-encoded, so trailing zero bytes contain no set bits and are
+// semantically insignificant: readers derive the bit count from each row's byte
+// length and zero-extend shorter operands during unions (see scanner.go).
+//
+// The stored column is variable-length BINARY, so trimming is safe and keeps
+// per-row bitmaps at their natural size. Previously every bitmap in a section
+// was zero-padded to the section's longest bitmap, which — when a single hot
+// label matched many streams — allocated and zeroed that maximum length for
+// every row, dominating both compaction CPU and index object size.
+func trimTrailingZeros(b []byte) []byte {
+	n := len(b)
+	for n > 0 && b[n-1] == 0 {
+		n--
+	}
+	return b[:n]
 }
 
 // writeSection encodes a single-kind section (blooms or labels) into a columnar
@@ -103,7 +121,7 @@ func (p *postingsEncoder) writeSection(w dataobj.SectionWriter, tenant string, b
 // encodeColumns encodes bloom and label entries into the provided columnar
 // encoder. Bloom entries (Kind=0) first, label entries (Kind=1) second.
 func (p *postingsEncoder) encodeColumns(bloomEntries []BloomEntry, labelEntries []LabelEntry, enc *columnar.Encoder) error {
-	// Build column builders for all 10 columns.
+	// Build column builders for all 13 columns.
 
 	// kind is a 2-value flag (0=bloom, 1=label). With sorted rows (blooms first,
 	// then labels), deltas are almost all zeros — ZSTD compresses these runs very
@@ -125,9 +143,14 @@ func (p *postingsEncoder) encodeColumns(bloomEntries []BloomEntry, labelEntries 
 		return fmt.Errorf("creating kind column: %w", err)
 	}
 
-	objectPathBuilder, err := binaryColumnBuilder(ColumnTypeObjectPath, p.pageSizeHint, p.pageMaxRowCount)
+	objectPathBuilder, err := binaryColumnBuilder(ColumnTypeObjectPath, p.pageSizeHint, p.pageMaxRowCount, false)
 	if err != nil {
 		return fmt.Errorf("creating object_path column: %w", err)
+	}
+
+	shardBucketsBuilder, err := numberColumnBuilder(ColumnTypeShardBuckets, p.pageSizeHint, p.pageMaxRowCount)
+	if err != nil {
+		return fmt.Errorf("creating shard_buckets column: %w", err)
 	}
 
 	sectionIndexBuilder, err := numberColumnBuilder(ColumnTypeSectionIndex, p.pageSizeHint, p.pageMaxRowCount)
@@ -135,12 +158,12 @@ func (p *postingsEncoder) encodeColumns(bloomEntries []BloomEntry, labelEntries 
 		return fmt.Errorf("creating section_index column: %w", err)
 	}
 
-	columnNameBuilder, err := binaryColumnBuilder(ColumnTypeColumnName, p.pageSizeHint, p.pageMaxRowCount)
+	columnNameBuilder, err := binaryColumnBuilder(ColumnTypeColumnName, p.pageSizeHint, p.pageMaxRowCount, true)
 	if err != nil {
 		return fmt.Errorf("creating column_name column: %w", err)
 	}
 
-	labelValueBuilder, err := binaryColumnBuilder(ColumnTypeLabelValue, p.pageSizeHint, p.pageMaxRowCount)
+	labelValueBuilder, err := binaryColumnBuilder(ColumnTypeLabelValue, p.pageSizeHint, p.pageMaxRowCount, true)
 	if err != nil {
 		return fmt.Errorf("creating label_value column: %w", err)
 	}
@@ -159,7 +182,7 @@ func (p *postingsEncoder) encodeColumns(bloomEntries []BloomEntry, labelEntries 
 		return fmt.Errorf("creating bloom_filter column: %w", err)
 	}
 
-	streamIDBitmapBuilder, err := binaryColumnBuilder(ColumnTypeStreamIDBitmap, p.pageSizeHint, p.pageMaxRowCount)
+	streamIDBitmapBuilder, err := binaryColumnBuilder(ColumnTypeStreamIDBitmap, p.pageSizeHint, p.pageMaxRowCount, false)
 	if err != nil {
 		return fmt.Errorf("creating stream_id_bitmap column: %w", err)
 	}
@@ -179,27 +202,14 @@ func (p *postingsEncoder) encodeColumns(bloomEntries []BloomEntry, labelEntries 
 		return fmt.Errorf("creating max_timestamp column: %w", err)
 	}
 
-	// Compute the max bitmap length across both bloom and label entries for normalization.
-	maxBitmapLen := 0
-	for _, e := range bloomEntries {
-		if len(e.StreamIDBitmap) > maxBitmapLen {
-			maxBitmapLen = len(e.StreamIDBitmap)
-		}
-	}
-	for _, e := range labelEntries {
-		if len(e.StreamIDBitmap) > maxBitmapLen {
-			maxBitmapLen = len(e.StreamIDBitmap)
-		}
+	minShardBucketBuilder, err := numberColumnBuilder(ColumnTypeMinShardBucket, p.pageSizeHint, p.pageMaxRowCount)
+	if err != nil {
+		return fmt.Errorf("creating min_shard_bucket column: %w", err)
 	}
 
-	// normalizeBitmap pads a bitmap to maxBitmapLen.
-	normalizeBitmap := func(b []byte) []byte {
-		if len(b) == maxBitmapLen {
-			return b
-		}
-		padded := make([]byte, maxBitmapLen)
-		copy(padded, b)
-		return padded
+	maxShardBucketBuilder, err := numberColumnBuilder(ColumnTypeMaxShardBucket, p.pageSizeHint, p.pageMaxRowCount)
+	if err != nil {
+		return fmt.Errorf("creating max_shard_bucket column: %w", err)
 	}
 
 	// Populate column builders: bloom entries first (Kind=0), then label entries (Kind=1).
@@ -208,47 +218,52 @@ func (p *postingsEncoder) encodeColumns(bloomEntries []BloomEntry, labelEntries 
 	for _, e := range bloomEntries {
 		_ = kindBuilder.Append(rowIdx, dataset.Int64Value(int64(KindBloom)))
 		_ = objectPathBuilder.Append(rowIdx, dataset.BinaryValue([]byte(e.ObjectPath)))
+		_ = shardBucketsBuilder.Append(rowIdx, dataset.Int64Value(e.ShardBuckets))
 		_ = sectionIndexBuilder.Append(rowIdx, dataset.Int64Value(e.SectionIndex))
 		_ = columnNameBuilder.Append(rowIdx, dataset.BinaryValue([]byte(e.ColumnName)))
 		_ = labelValueBuilder.Append(rowIdx, dataset.Value{}) // null for bloom
 		_ = bloomFilterBuilder.Append(rowIdx, dataset.BinaryValue(e.BloomFilter))
-		_ = streamIDBitmapBuilder.Append(rowIdx, dataset.BinaryValue(normalizeBitmap(e.StreamIDBitmap)))
+		_ = streamIDBitmapBuilder.Append(rowIdx, dataset.BinaryValue(trimTrailingZeros(e.StreamIDBitmap)))
 		_ = uncompressedSizeBuilder.Append(rowIdx, dataset.Int64Value(e.UncompressedSize))
 		_ = minTimestampBuilder.Append(rowIdx, dataset.Int64Value(e.MinTimestamp))
 		_ = maxTimestampBuilder.Append(rowIdx, dataset.Int64Value(e.MaxTimestamp))
+		_ = minShardBucketBuilder.Append(rowIdx, dataset.Value{}) // null for bloom
+		_ = maxShardBucketBuilder.Append(rowIdx, dataset.Value{}) // null for bloom
 		rowIdx++
 	}
 
 	for _, e := range labelEntries {
 		_ = kindBuilder.Append(rowIdx, dataset.Int64Value(int64(KindLabel)))
 		_ = objectPathBuilder.Append(rowIdx, dataset.BinaryValue([]byte(e.ObjectPath)))
+		_ = shardBucketsBuilder.Append(rowIdx, dataset.Int64Value(e.ShardBuckets))
 		_ = sectionIndexBuilder.Append(rowIdx, dataset.Int64Value(e.SectionIndex))
 		_ = columnNameBuilder.Append(rowIdx, dataset.BinaryValue([]byte(e.ColumnName)))
 		_ = labelValueBuilder.Append(rowIdx, dataset.BinaryValue([]byte(e.LabelValue)))
 		_ = bloomFilterBuilder.Append(rowIdx, dataset.Value{}) // null for label
-		_ = streamIDBitmapBuilder.Append(rowIdx, dataset.BinaryValue(normalizeBitmap(e.StreamIDBitmap)))
+		_ = streamIDBitmapBuilder.Append(rowIdx, dataset.BinaryValue(trimTrailingZeros(e.StreamIDBitmap)))
 		_ = uncompressedSizeBuilder.Append(rowIdx, dataset.Int64Value(e.UncompressedSize))
 		_ = minTimestampBuilder.Append(rowIdx, dataset.Int64Value(e.MinTimestamp))
 		_ = maxTimestampBuilder.Append(rowIdx, dataset.Int64Value(e.MaxTimestamp))
+		_ = minShardBucketBuilder.Append(rowIdx, dataset.Int64Value(int64(e.MinShardBucket)))
+		_ = maxShardBucketBuilder.Append(rowIdx, dataset.Int64Value(int64(e.MaxShardBucket)))
 		rowIdx++
 	}
 
-	enc.SetSortInfo(&datasetmd.SortInfo{
-		ColumnSorts: []*datasetmd.SortInfo_ColumnSort{
-			{ColumnIndex: 0, Direction: datasetmd.SORT_DIRECTION_ASCENDING}, // kind
-			{ColumnIndex: 3, Direction: datasetmd.SORT_DIRECTION_ASCENDING}, // column_name
-			{ColumnIndex: 4, Direction: datasetmd.SORT_DIRECTION_ASCENDING}, // label_value
-			{ColumnIndex: 8, Direction: datasetmd.SORT_DIRECTION_ASCENDING}, // min_timestamp
-			{ColumnIndex: 9, Direction: datasetmd.SORT_DIRECTION_ASCENDING}, // max_timestamp
-			{ColumnIndex: 1, Direction: datasetmd.SORT_DIRECTION_ASCENDING}, // object_path
-			{ColumnIndex: 2, Direction: datasetmd.SORT_DIRECTION_ASCENDING}, // section_index
-		},
-	})
+	enc.SetSortInfo(&datasetmd.SortInfo{ColumnSorts: []*datasetmd.SortInfo_ColumnSort{
+		{ColumnIndex: 0, Direction: datasetmd.SORT_DIRECTION_ASCENDING},  // kind
+		{ColumnIndex: 4, Direction: datasetmd.SORT_DIRECTION_ASCENDING},  // column_name
+		{ColumnIndex: 5, Direction: datasetmd.SORT_DIRECTION_ASCENDING},  // label_value
+		{ColumnIndex: 9, Direction: datasetmd.SORT_DIRECTION_ASCENDING},  // min_timestamp
+		{ColumnIndex: 10, Direction: datasetmd.SORT_DIRECTION_ASCENDING}, // max_timestamp
+		{ColumnIndex: 1, Direction: datasetmd.SORT_DIRECTION_ASCENDING},  // object_path
+		{ColumnIndex: 3, Direction: datasetmd.SORT_DIRECTION_ASCENDING},  // section_index
+	}})
 
 	// Encode all columns.
-	errs := make([]error, 0, 10)
+	errs := make([]error, 0, 13)
 	errs = append(errs, encodeColumn(enc, ColumnTypeKind, kindBuilder))
 	errs = append(errs, encodeColumn(enc, ColumnTypeObjectPath, objectPathBuilder))
+	errs = append(errs, encodeColumn(enc, ColumnTypeShardBuckets, shardBucketsBuilder))
 	errs = append(errs, encodeColumn(enc, ColumnTypeSectionIndex, sectionIndexBuilder))
 	errs = append(errs, encodeColumn(enc, ColumnTypeColumnName, columnNameBuilder))
 	errs = append(errs, encodeColumn(enc, ColumnTypeLabelValue, labelValueBuilder))
@@ -257,6 +272,8 @@ func (p *postingsEncoder) encodeColumns(bloomEntries []BloomEntry, labelEntries 
 	errs = append(errs, encodeColumn(enc, ColumnTypeUncompressedSize, uncompressedSizeBuilder))
 	errs = append(errs, encodeColumn(enc, ColumnTypeMinTimestamp, minTimestampBuilder))
 	errs = append(errs, encodeColumn(enc, ColumnTypeMaxTimestamp, maxTimestampBuilder))
+	errs = append(errs, encodeColumn(enc, ColumnTypeMinShardBucket, minShardBucketBuilder))
+	errs = append(errs, encodeColumn(enc, ColumnTypeMaxShardBucket, maxShardBucketBuilder))
 
 	if err := errors.Join(errs...); err != nil {
 		return fmt.Errorf("encoding columns: %w", err)
@@ -269,7 +286,7 @@ func (p *postingsEncoder) encodeColumns(bloomEntries []BloomEntry, labelEntries 
 // Tag is empty: postings columns are all fixed (one column per Logical type),
 // so Logical alone uniquely identifies the column. Setting Tag would duplicate
 // it. Matches the convention used by streams.Reader for fixed columns.
-func binaryColumnBuilder(logicalType ColumnType, pageSize, pageRowCount int) (*dataset.ColumnBuilder, error) {
+func binaryColumnBuilder(logicalType ColumnType, pageSize, pageRowCount int, storeRangeStats bool) (*dataset.ColumnBuilder, error) {
 	return dataset.NewColumnBuilder("", dataset.BuilderOptions{
 		PageSizeHint:    pageSize,
 		PageMaxRowCount: pageRowCount,
@@ -279,6 +296,9 @@ func binaryColumnBuilder(logicalType ColumnType, pageSize, pageRowCount int) (*d
 		},
 		Encoding:    datasetmd.ENCODING_TYPE_PLAIN,
 		Compression: datasetmd.COMPRESSION_TYPE_ZSTD,
+		Statistics: dataset.StatisticsOptions{
+			StoreRangeStats: storeRangeStats,
+		},
 	})
 }
 

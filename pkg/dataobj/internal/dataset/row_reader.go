@@ -7,8 +7,6 @@ import (
 	"io"
 	"iter"
 
-	"github.com/bits-and-blooms/bloom/v3"
-
 	"github.com/grafana/loki/v3/pkg/dataobj"
 	"github.com/grafana/loki/v3/pkg/dataobj/internal/metadata/datasetmd"
 	"github.com/grafana/loki/v3/pkg/dataobj/internal/util/bitmask"
@@ -35,10 +33,26 @@ type RowReaderOptions struct {
 	// Holds a list of predicates that can be sequentially applied to the dataset.
 	Predicates []Predicate
 
-	// Prefetch enables bulk retrieving pages from the dataset when reading
-	// starts. To reduce read latency, this option should only be disabled when
-	// the entire Dataset is already held in memory.
-	Prefetch bool
+	// PrefetchAllOnOpen controls when pages are downloaded.
+	//
+	// If true, all pages are downloaded when the reader is opened.
+	// If false, pages are downloaded lazily as they are read, targeting
+	// [defaultTargetDownloadedBytes] bytes of cached pages at a time. Pages
+	// required for the current read range are always downloaded even if they
+	// exceed the target.
+	PrefetchAllOnOpen bool
+
+	// StatsTracker keeps track of the various reader internal stats.
+	StatsTracker RowReaderStatsTracker
+}
+
+type RowReaderStatsTracker interface {
+	OnColumnPredicateBuilt(column Column, stats ColumnReadPageStats)
+}
+
+type ColumnReadPageStats struct {
+	Total    uint64
+	Relevant uint64
 }
 
 // A RowReader reads [Row]s from a [Dataset].
@@ -379,32 +393,6 @@ func checkPredicate(p Predicate, lookup map[Column]int, row Row) bool {
 		}
 		return p.Keep(p.Column, row.Values[columnIndex])
 
-	case BloomMatchPredicate:
-		columnIndex, ok := lookup[p.Column]
-		if !ok {
-			panic("checkPredicate: column not found")
-		}
-		value := row.Values[columnIndex]
-		if value.IsNil() || value.Type() != p.Column.ColumnDesc().Type.Physical {
-			return false
-		}
-		var filter bloom.BloomFilter
-		if err := filter.UnmarshalBinary(value.Binary()); err != nil {
-			return false
-		}
-		return filter.Test(p.Value)
-
-	case RegexMatchPredicate:
-		columnIndex, ok := lookup[p.Column]
-		if !ok {
-			panic("checkPredicate: column not found")
-		}
-		value := row.Values[columnIndex]
-		if value.IsNil() || value.Type() != p.Column.ColumnDesc().Type.Physical {
-			return false
-		}
-		return p.Matcher.MatchString(string(value.Binary()))
-
 	default:
 		panic(fmt.Sprintf("unsupported predicate type %T", p))
 	}
@@ -509,40 +497,25 @@ func (r *RowReader) init(ctx context.Context) error {
 }
 
 func (r *RowReader) prefetchPages(ctx context.Context) error {
-	if !r.opts.Prefetch {
+	if !r.opts.PrefetchAllOnOpen {
 		return nil
 	}
 	return r.dl.Prefetch(ctx)
 }
 
-// allColumns returns the full set of column to read. If r was configured with
-// prefetching, wrapped columns from [rowReaderDownloader] are returned. Otherwise,
-// the columns of the original dataset are returned.
+// allColumns returns the full set of columns to read.
 func (r *RowReader) allColumns() []Column {
-	if r.opts.Prefetch {
-		return r.dl.AllColumns()
-	}
-	return r.dl.OrigColumns()
+	return r.dl.AllColumns()
 }
 
-// primaryColumns returns the primary columns to read. If r was configured with
-// prefetching, wrapped columns from [rowReaderDownloader] are returned. Otherwise,
-// the primary columns of the original dataset are returned.
+// primaryColumns returns the primary columns to read.
 func (r *RowReader) primaryColumns() []Column {
-	if r.opts.Prefetch {
-		return r.dl.PrimaryColumns()
-	}
-	return r.dl.OrigPrimaryColumns()
+	return r.dl.PrimaryColumns()
 }
 
-// secondaryColumns returns the secondary columns to read. If r was configured with
-// prefetching, wrapped columns from [rowReaderDownloader] are returned. Otherwise,
-// the secondary columns of the original dataset are returned.
+// secondaryColumns returns the secondary columns to read.
 func (r *RowReader) secondaryColumns() []Column {
-	if r.opts.Prefetch {
-		return r.dl.SecondaryColumns()
-	}
-	return r.dl.OrigSecondaryColumns()
+	return r.dl.SecondaryColumns()
 }
 
 // validatePredicate ensures that all columns used in a predicate have been
@@ -575,10 +548,6 @@ func (r *RowReader) validatePredicate() error {
 				err = process(p.Column)
 			case FuncPredicate:
 				err = process(p.Column)
-			case BloomMatchPredicate:
-				err = process(p.Column)
-			case RegexMatchPredicate:
-				err = process(p.Column)
 			case AndPredicate, OrPredicate, NotPredicate, TruePredicate, FalsePredicate, nil:
 				// No columns to process.
 			default:
@@ -607,6 +576,11 @@ func (r *RowReader) initDownloader(ctx context.Context) error {
 		r.dl = newRowReaderDownloader(r.opts.Dataset)
 	} else {
 		r.dl.Reset(r.opts.Dataset)
+	}
+
+	r.dl.targetCompressedBytes = defaultTargetDownloadedBytes
+	if r.opts.PrefetchAllOnOpen {
+		r.dl.targetCompressedBytes = 0
 	}
 
 	mask := bitmask.New(len(r.opts.Columns))
@@ -698,10 +672,6 @@ func (r *RowReader) fillPrimaryMask(mask *bitmask.Mask) {
 				process(p.Column)
 			case FuncPredicate:
 				process(p.Column)
-			case BloomMatchPredicate:
-				process(p.Column)
-			case RegexMatchPredicate:
-				process(p.Column)
 			case AndPredicate, OrPredicate, NotPredicate, TruePredicate, FalsePredicate, nil:
 				// No columns to process.
 			default:
@@ -773,7 +743,7 @@ func (r *RowReader) buildPredicateRanges(ctx context.Context, p Predicate) (rang
 	case LessThanPredicate:
 		return r.buildColumnPredicateRanges(ctx, p.Column, p)
 
-	case TruePredicate, FuncPredicate, BloomMatchPredicate, RegexMatchPredicate, nil:
+	case TruePredicate, FuncPredicate, nil:
 		// These predicates (and nil) don't support any filtering, so it maps to
 		// the full range being valid.
 		//
@@ -875,6 +845,9 @@ func (r *RowReader) buildColumnPredicateRanges(ctx context.Context, c Column, p 
 
 		isStreamCol      = isStreamIDColumn(c)
 		prevPageIncluded bool // used for tracking avg run length
+
+		totalPages    = uint64(c.ColumnDesc().PagesCount)
+		relevantPages = uint64(0)
 	)
 
 	for result := range c.ListPages(ctx) {
@@ -902,6 +875,7 @@ func (r *RowReader) buildColumnPredicateRanges(ctx context.Context, c Column, p 
 		} else if minValue.IsNil() || maxValue.IsNil() {
 			// No stats, so we add the whole range.
 			ranges.Add(pageRange)
+			relevantPages++
 
 			if isStreamCol {
 				region.Record(dataobj.StatStreamRelevantPages.Observe(1))
@@ -941,6 +915,7 @@ func (r *RowReader) buildColumnPredicateRanges(ctx context.Context, c Column, p 
 
 		if include {
 			ranges.Add(pageRange)
+			relevantPages++
 
 			if isStreamCol {
 				region.Record(dataobj.StatStreamRelevantPages.Observe(1))
@@ -959,6 +934,10 @@ func (r *RowReader) buildColumnPredicateRanges(ctx context.Context, c Column, p 
 		}
 
 		prevPageIncluded = include
+	}
+
+	if r.opts.StatsTracker != nil {
+		r.opts.StatsTracker.OnColumnPredicateBuilt(c, ColumnReadPageStats{totalPages, relevantPages})
 	}
 
 	return ranges, nil
@@ -998,10 +977,6 @@ func (r *RowReader) predicateColumns(p Predicate, keep func(c Column) bool) ([]C
 		case LessThanPredicate:
 			columns[p.Column] = struct{}{}
 		case FuncPredicate:
-			columns[p.Column] = struct{}{}
-		case BloomMatchPredicate:
-			columns[p.Column] = struct{}{}
-		case RegexMatchPredicate:
 			columns[p.Column] = struct{}{}
 		case AndPredicate, OrPredicate, NotPredicate, TruePredicate, FalsePredicate, nil:
 			// No columns to process.

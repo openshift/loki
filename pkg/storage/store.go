@@ -289,6 +289,19 @@ func shouldUseIndexGatewayClient(cfg indexshipper.Config) bool {
 	return true
 }
 
+func shouldUseTeeIndexGatewayClient(cfg indexshipper.Config) bool {
+	if !shouldUseIndexGatewayClient(cfg) {
+		return false
+	}
+
+	teeCfg := cfg.ShadowIndexGatewayClientConfig
+	if teeCfg.Mode == indexgateway.SimpleMode && teeCfg.Address == "" {
+		return false
+	}
+
+	return true
+}
+
 func (s *LokiStore) storeForPeriod(p config.PeriodConfig, tableRange config.TableRange, chunkClient client.Client, f *fetcher.Fetcher) (stores.ChunkWriter, index.ReaderWriter, func(), error) {
 	// currently we only support one index type "tsdb" so all the code below here applies to tsdb only. this method will need to be improved should we ever support another type
 	if !slices.Contains(types.SupportedIndexTypes, p.IndexType) {
@@ -300,16 +313,36 @@ func (s *LokiStore) storeForPeriod(p config.PeriodConfig, tableRange config.Tabl
 	indexClientLogger := log.With(s.logger, "index-store", fmt.Sprintf("%s-%s", p.IndexType, p.From.String()))
 
 	if shouldUseIndexGatewayClient(s.cfg.TSDBShipperConfig) {
-		// inject the index-gateway client into the index store
-		gw, err := indexgateway.NewGatewayClient(s.cfg.TSDBShipperConfig.IndexGatewayClientConfig, indexClientReg, s.limits, indexClientLogger, s.metricsNamespace)
+		primaryClient, err := indexgateway.NewGatewayClient(s.cfg.TSDBShipperConfig.IndexGatewayClientConfig, indexClientReg, s.limits, indexClientLogger, s.metricsNamespace)
 		if err != nil {
 			return nil, nil, nil, err
 		}
-		idx := series.NewIndexGatewayClientStore(gw, indexClientLogger)
+
+		var shadowClient *indexgateway.GatewayClient
+		var clientToUse series.GatewayClient = primaryClient
+		if shouldUseTeeIndexGatewayClient(s.cfg.TSDBShipperConfig) {
+			shadowClient, err = indexgateway.NewGatewayClient(s.cfg.TSDBShipperConfig.ShadowIndexGatewayClientConfig, indexClientReg, s.limits, indexClientLogger, s.metricsNamespace)
+			if err != nil {
+				primaryClient.Stop()
+				return nil, nil, nil, err
+			}
+			teeClient, err := indexgateway.NewTeeGatewayClient(primaryClient, shadowClient, indexClientReg, indexClientLogger)
+			if err != nil {
+				primaryClient.Stop()
+				shadowClient.Stop()
+				return nil, nil, nil, err
+			}
+			clientToUse = teeClient
+		}
+
+		idx := series.NewIndexGatewayClientStore(clientToUse, indexClientLogger)
 
 		return failingChunkWriter{}, index.NewMonitoredReaderWriter(idx, indexClientReg), func() {
 			f.Stop()
-			gw.Stop()
+			primaryClient.Stop()
+			if shadowClient != nil {
+				shadowClient.Stop()
+			}
 		}, nil
 	}
 
@@ -570,28 +603,33 @@ func (s *LokiStore) SelectSamples(ctx context.Context, req logql.SelectSamplePar
 		return nil, err
 	}
 
-	extractors, err := expr.Extractors()
+	extractor, err := expr.Extractor()
+	if err != nil {
+		return nil, err
+	}
+	// A literal or a vector expression produces samples without reading logs, so its
+	// extractor is nil and there is no chunk worth touching. The plan is
+	// caller-supplied, so guard rather than assume such a request never arrives.
+	//
+	// Guard before SetupExtractor: given deletes it wraps the nil extractor into a
+	// non-nil filtering one, and this check would stop firing.
+	if extractor == nil {
+		return iter.NoopSampleIterator, nil
+	}
+
+	extractor, err = deletion.SetupExtractor(req, extractor)
 	if err != nil {
 		return nil, err
 	}
 
-	for i, extractor := range extractors {
-		extractor, err = deletion.SetupExtractor(req, extractor)
+	if s.extractorWrapper != nil &&
+		httpreq.ExtractHeader(ctx, httpreq.LokiDisablePipelineWrappersHeader) != "true" {
+		userID, err := tenant.TenantID(ctx)
 		if err != nil {
 			return nil, err
 		}
 
-		if s.extractorWrapper != nil &&
-			httpreq.ExtractHeader(ctx, httpreq.LokiDisablePipelineWrappersHeader) != "true" {
-			userID, err := tenant.TenantID(ctx)
-			if err != nil {
-				return nil, err
-			}
-
-			extractor = s.extractorWrapper.Wrap(ctx, extractor, req.Plan.String(), userID)
-		}
-
-		extractors[i] = extractor
+		extractor = s.extractorWrapper.Wrap(ctx, extractor, req.Plan.String(), userID)
 	}
 
 	var chunkFilterer chunk.Filterer
@@ -599,7 +637,7 @@ func (s *LokiStore) SelectSamples(ctx context.Context, req logql.SelectSamplePar
 		chunkFilterer = s.chunkFilterer.ForRequest(ctx)
 	}
 
-	return newSampleBatchIterator(
+	return newTimestampFirstSampleBatchIterator(
 		ctx,
 		s.schemaCfg,
 		s.chunkMetrics,
@@ -609,7 +647,7 @@ func (s *LokiStore) SelectSamples(ctx context.Context, req logql.SelectSamplePar
 		req.Start,
 		req.End,
 		chunkFilterer,
-		extractors...,
+		extractor,
 	)
 }
 

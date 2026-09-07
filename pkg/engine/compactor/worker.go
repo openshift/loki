@@ -21,14 +21,17 @@ type WorkerParams struct {
 	Config WorkerConfig
 
 	Bucket       objstore.Bucket
+	DataBucket   objstore.Bucket     // unprefixed bucket for reading source log objects; nil falls back to Bucket
 	Metastore    metastore.Metastore // may be nil in tests where no task ever arrives
 	ScratchStore scratch.Store
 
 	Logger     log.Logger
 	Registerer prometheus.Registerer
 
-	// IndexobjCfg controls index object construction parameters.
+	// IndexobjCfg controls index object construction parameters for compaction.
 	IndexobjCfg logsobj.BuilderBaseConfig
+	// LogsobjCfg controls index object construction parameters for compaction.
+	LogsobjCfg logsobj.BuilderBaseConfig
 }
 
 // Worker is the dataobj-compaction-worker target service. It wraps an
@@ -84,6 +87,7 @@ func NewWorker(params WorkerParams) (*Worker, error) {
 	inner, err := engine.NewWorker(engine.WorkerParams{
 		Logger:       log.With(logger, "component", "dataobj-compaction-worker"),
 		Bucket:       params.Bucket,
+		DataBucket:   params.DataBucket,
 		Metastore:    params.Metastore,
 		ScratchStore: params.ScratchStore,
 		Config: engine.WorkerConfig{
@@ -100,7 +104,9 @@ func NewWorker(params WorkerParams) (*Worker, error) {
 		// LocalScheduler left nil: the compaction worker only ever
 		// connects to remote schedulers via DNS-SRV.
 		IndexobjCfg:        params.IndexobjCfg,
+		LogsobjCfg:         params.LogsobjCfg,
 		IndexMergeObserver: wm,
+		LogMergeObserver:   wm,
 	}, registerer)
 	if err != nil {
 		return nil, fmt.Errorf("dataobj compaction worker: construct engine worker: %w", err)
