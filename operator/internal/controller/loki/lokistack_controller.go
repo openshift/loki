@@ -61,6 +61,9 @@ var (
 				// are valid after considering the readiness probes to access
 				// the public net through these proxies.
 				return true
+			case *openshiftconfigv1.Console:
+				// Console status.consoleURL is used as the Loki ruler alert Source link.
+				return true
 			default:
 				// Update only if generation change, filter out anything else.
 				// We only need to check generation change here, because it is only
@@ -127,7 +130,7 @@ type LokiStackReconciler struct {
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=ingresses,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=networking.k8s.io,resources=networkpolicies,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=policy,resources=poddisruptionbudgets,verbs=get;list;watch;create;update
-// +kubebuilder:rbac:groups=config.openshift.io,resources=dnses;apiservers;proxies;clusterversions,verbs=get;list;watch
+// +kubebuilder:rbac:groups=config.openshift.io,resources=dnses;apiservers;proxies;clusterversions;consoles,verbs=get;list;watch
 // +kubebuilder:rbac:groups=route.openshift.io,resources=routes,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=cloudcredential.openshift.io,resources=credentialsrequests,verbs=get;list;watch;create;update;delete
 // +kubebuilder:rbac:groups=discovery.k8s.io,resources=endpointslices,verbs=get;list;watch
@@ -241,6 +244,8 @@ func (r *LokiStackReconciler) buildController(bld k8s.Builder) error {
 		if r.FeatureGates.OpenShift.ClusterProxy {
 			bld = bld.Watches(&openshiftconfigv1.Proxy{}, r.enqueueAllLokiStacksHandler(), updateOrDeleteOnlyPred)
 		}
+
+		bld = bld.Watches(&openshiftconfigv1.Console{}, r.enqueueAllLokiStacksHandler(), updateOrDeleteOnlyPred)
 	} else {
 		bld = bld.Owns(&networkingv1.Ingress{}, updateOrDeleteOnlyPred)
 	}

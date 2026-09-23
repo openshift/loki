@@ -494,6 +494,30 @@ func TestConfigOptions_RulerAlertManager(t *testing.T) {
 			},
 		},
 		{
+			desc: "openshift-logging mode with console url",
+			opts: Options{
+				Stack: lokiv1.LokiStackSpec{
+					Tenants: &lokiv1.TenantsSpec{
+						Mode: lokiv1.OpenshiftLogging,
+					},
+				},
+				Timeouts: testTimeoutConfig(),
+				OpenShiftOptions: openshift.Options{
+					BuildOpts: openshift.BuildOptions{
+						AlertManagerEnabled: true,
+						ConsoleURL:          "https://console.apps.example.com",
+					},
+				},
+			},
+			wantOptions: &config.AlertManagerConfig{
+				EnableV2:        true,
+				EnableDiscovery: true,
+				RefreshInterval: "1m",
+				Hosts:           "https://_web._tcp.alertmanager-operated.openshift-monitoring.svc",
+				ExternalURL:     "https://console.apps.example.com/monitoring/logs",
+			},
+		},
+		{
 			desc: "openshift-network mode",
 			opts: Options{
 				Stack: lokiv1.LokiStackSpec{
