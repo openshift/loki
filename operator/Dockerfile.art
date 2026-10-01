@@ -9,10 +9,12 @@ COPY . /opt/app-root/src/operator
 WORKDIR /opt/app-root/src/operator
 
 RUN go build -tags strictfipsruntime -a -o ./manager ./cmd/loki-operator/main.go
+RUN go build -tags strictfipsruntime -a -o passthrough-gateway ./cmd/passthrough-gateway/
 
 FROM registry.redhat.io/ubi9/ubi-minimal:9.8
 
 COPY --from=builder /opt/app-root/src/operator/manager /manager
+COPY --from=builder /opt/app-root/src/operator/passthrough-gateway /bin/passthrough-gateway
 
 ENTRYPOINT ["/manager"]
 
