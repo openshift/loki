@@ -36,8 +36,9 @@ var (
 	errSecretUnknownCredentialMode = errors.New("unknown credential mode")
 
 	errAzureManagedIdentityNoOverride = errors.New("when in managed mode, storage secret can not contain credentials")
-	errAzureInvalidEnvironment        = errors.New("azure environment invalid (valid values: AzureGlobal, AzureChinaCloud, AzureGermanCloud, AzureUSGovernment)")
+	errAzureInvalidEnvironment        = errors.New("azure environment invalid (valid values: AzureGlobal, AzurePublicCloud, AzureChinaCloud, AzureGermanCloud, AzureUSGovernment)")
 	errAzureInvalidAccountKey         = errors.New("azure account key is not valid base64")
+	errAzureInvalidEndpointSuffix     = errors.New("azure endpoint suffix invalid")
 
 	errS3EndpointUnparseable       = errors.New("can not parse S3 endpoint as URL")
 	errS3EndpointNoURL             = errors.New("endpoint for S3 must be an HTTP or HTTPS URL")
@@ -48,11 +49,12 @@ var (
 	errGCPWrongCredentialSourceFile = errors.New("credential source in secret needs to point to token file")
 	errGCPInvalidCredentialsFile    = errors.New("gcp credentials file contains invalid fields")
 
-	azureValidEnvironments = map[string]bool{
-		"AzureGlobal":       true,
-		"AzureChinaCloud":   true,
-		"AzureGermanCloud":  true,
-		"AzureUSGovernment": true,
+	azureEnvironmentEndpointSuffix = map[string]string{
+		"AzureGlobal":       "blob.core.windows.net",
+		"AzurePublicCloud":  "blob.core.windows.net",
+		"AzureChinaCloud":   "blob.core.chinacloudapi.cn",
+		"AzureGermanCloud":  "blob.core.cloudapi.de",
+		"AzureUSGovernment": "blob.core.usgovcloudapi.net",
 	}
 )
 
@@ -237,12 +239,22 @@ func hashSecretData(s *corev1.Secret) (string, error) {
 func extractAzureConfigSecret(s *corev1.Secret, credentialMode lokiv1.CredentialMode) (*storage.AzureStorageConfig, error) {
 	// Extract and validate mandatory fields
 	env := string(s.Data[storage.KeyAzureEnvironmentName])
-	if env == "" {
-		return nil, fmt.Errorf("%w: %s", errSecretMissingField, storage.KeyAzureEnvironmentName)
+	endpointSuffix := string(s.Data[storage.KeyAzureStorageEndpointSuffix])
+	if env == "" && endpointSuffix == "" {
+		return nil, fmt.Errorf("%w: either %s or %s should be set", errSecretMissingField, storage.KeyAzureEnvironmentName, storage.KeyAzureStorageEndpointSuffix)
 	}
 
-	if !azureValidEnvironments[env] {
+	envEndpointSuffix, ok := azureEnvironmentEndpointSuffix[env]
+	if env != "" && !ok {
 		return nil, fmt.Errorf("%w: %s", errAzureInvalidEnvironment, env)
+	}
+
+	if endpointSuffix == "" {
+		endpointSuffix = envEndpointSuffix
+	}
+
+	if !endpointSuffixExists(azureEnvironmentEndpointSuffix, endpointSuffix) {
+		return nil, fmt.Errorf("%w: %s", errAzureInvalidEndpointSuffix, endpointSuffix)
 	}
 
 	accountName := s.Data[storage.KeyAzureStorageAccountName]
@@ -261,7 +273,6 @@ func extractAzureConfigSecret(s *corev1.Secret, credentialMode lokiv1.Credential
 	}
 
 	// Extract and validate optional fields
-	endpointSuffix := s.Data[storage.KeyAzureStorageEndpointSuffix]
 	audience := s.Data[storage.KeyAzureAudience]
 
 	if !workloadIdentity && len(audience) > 0 {
@@ -269,7 +280,6 @@ func extractAzureConfigSecret(s *corev1.Secret, credentialMode lokiv1.Credential
 	}
 
 	return &storage.AzureStorageConfig{
-		Env:              env,
 		Container:        string(container),
 		EndpointSuffix:   string(endpointSuffix),
 		Audience:         string(audience),
@@ -403,7 +413,7 @@ func extractS3ConfigSecret(s *corev1.Secret, credentialMode lokiv1.CredentialMod
 
 	var (
 		// Fields related with static authentication
-		endpoint = s.Data[storage.KeyAWSEndpoint]
+		endpoint = string(s.Data[storage.KeyAWSEndpoint])
 		id       = s.Data[storage.KeyAWSAccessKeyID]
 		secret   = s.Data[storage.KeyAWSAccessKeySecret]
 		// Fields related with STS authentication
@@ -439,13 +449,20 @@ func extractS3ConfigSecret(s *corev1.Secret, credentialMode lokiv1.CredentialMod
 		if len(region) == 0 {
 			return nil, fmt.Errorf("%w: %s", errSecretMissingField, storage.KeyAWSRegion)
 		}
+
 		return cfg, nil
 	case lokiv1.CredentialModeStatic:
-		cfg.Endpoint = string(endpoint)
-
-		if err := validateS3Endpoint(string(endpoint), string(region)); err != nil {
+		if err := validateS3Endpoint(endpoint, string(region)); err != nil {
 			return nil, err
 		}
+		parsedURL, err := url.Parse(endpoint)
+		if err != nil {
+			return nil, fmt.Errorf("%w:%s", errS3EndpointUnparseable, storage.KeyAWSEndpoint)
+		}
+
+		cfg.Endpoint = parsedURL.Host
+		cfg.Insecure = strings.HasPrefix(endpoint, "http://")
+
 		if len(id) == 0 {
 			return nil, fmt.Errorf("%w: %s", errSecretMissingField, storage.KeyAWSAccessKeyID)
 		}
@@ -462,6 +479,7 @@ func extractS3ConfigSecret(s *corev1.Secret, credentialMode lokiv1.CredentialMod
 		if len(region) == 0 {
 			return nil, fmt.Errorf("%w: %s", errSecretMissingField, storage.KeyAWSRegion)
 		}
+
 		return cfg, nil
 	default:
 		return nil, fmt.Errorf("%w: %s", errSecretUnknownCredentialMode, credentialMode)
@@ -614,4 +632,13 @@ func extractAlibabaCloudConfigSecret(s *corev1.Secret) (*storage.AlibabaCloudSto
 		Endpoint: string(endpoint),
 		Bucket:   string(bucket),
 	}, nil
+}
+
+func endpointSuffixExists(m map[string]string, value string) bool {
+	for _, v := range m {
+		if v == value {
+			return true
+		}
+	}
+	return false
 }
