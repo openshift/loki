@@ -1797,9 +1797,32 @@ func TestSendAlerts(t *testing.T) {
 				}
 				require.Equal(t, tc.exp, alerts)
 			})
-			SendAlerts(senderFunc, "http://localhost:8080", "uid")(context.TODO(), "up", tc.in...)
+			SendAlerts(senderFunc, "http://localhost:8080", "uid", "")(context.TODO(), "up", tc.in...)
 		})
 	}
+}
+
+func TestAlertGeneratorURL(t *testing.T) {
+	gotGrafana := alertGeneratorURL("http://localhost:8080", `count_over_time({job="app"}[5m])`, "", "")
+	require.True(t, strings.HasPrefix(gotGrafana, "http://localhost:8080/explore?"), gotGrafana)
+
+	gotConsole := alertGeneratorURL(
+		"https://console.apps.example.com/monitoring/logs",
+		`count_over_time({kubernetes_namespace_name="openshift-logging"}[5m]) > 0`,
+		"",
+		"infrastructure",
+	)
+	parsed, err := url.Parse(gotConsole)
+	require.NoError(t, err)
+	require.Equal(t, "https", parsed.Scheme)
+	require.Equal(t, "console.apps.example.com", parsed.Host)
+	require.Equal(t, "/monitoring/logs", parsed.Path)
+	require.Equal(t, `count_over_time({kubernetes_namespace_name="openshift-logging"}[5m]) > 0`, parsed.Query().Get("q"))
+	require.Equal(t, "infrastructure", parsed.Query().Get("tenant"))
+
+	// Relative / empty external URL keeps Grafana explore (Alertmanager/email clients drop relative hrefs).
+	gotRelative := alertGeneratorURL("", "up", "", "application")
+	require.True(t, strings.HasPrefix(gotRelative, "/explore?"), gotRelative)
 }
 
 type fakeQuerier struct {

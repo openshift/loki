@@ -1804,6 +1804,7 @@ spec:
           resources:
           - apiservers
           - clusterversions
+          - consoles
           - dnses
           - proxies
           verbs:
