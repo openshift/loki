@@ -251,8 +251,6 @@ github.com/grafana/loki/pkg/push v0.0.0-20250630054201-94c0ba7b0952 h1:rLzoJGDno
 github.com/grafana/loki/pkg/push v0.0.0-20250630054201-94c0ba7b0952/go.mod h1:ny/0bFitf8KNZkZfweaI4hmwb5XPhaFD2d0kVcyKmjo=
 github.com/grafana/loki/v3 v3.7.1 h1:Nw1TV8uHtiB6bkO9210kvHjewtgCyZtSippj7X42+O4=
 github.com/grafana/loki/v3 v3.7.1/go.mod h1:PSxKUN/jECwG9TXInjnX8Kh8wbUvM280ncwtE7ATTR4=
-github.com/grafana/loki/v3 v3.7.3 h1:oXJJtdGJ2zh3sJJvA3CfOzw4dV5gIHs0bgt1AgI0WQY=
-github.com/grafana/loki/v3 v3.7.3/go.mod h1:dGAX6YG/eXRoEUWXcFmsLBJ95JV2wWMugelP7gnsFTE=
 github.com/grafana/memberlist v0.3.1-0.20251126142931-6f9f62ab6f86 h1:aTwfQuroOmOr//QEn9J1MtC4R4CPR9/IbUd8hZrbWKo=
 github.com/grafana/memberlist v0.3.1-0.20251126142931-6f9f62ab6f86/go.mod h1:h60o12SZn/ua/j0B6iKAZezA4eDaGsIuPO70eOaJ6WE=
 github.com/grafana/otel-profiling-go v0.5.1 h1:stVPKAFZSa7eGiqbYuG25VcqYksR6iWvF3YH66t4qL8=
