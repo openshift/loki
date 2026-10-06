@@ -50,6 +50,8 @@ type BuildOptions struct {
 	AlertManagerEnabled             bool
 	UserWorkloadAlertManagerEnabled bool
 	ExternalAccessEnabled           bool
+	// ConsoleURL is the OpenShift Console URL used as the alert Source / generatorURL base.
+	ConsoleURL string
 }
 
 // TenantData defines the existing cookieSecret for lokistack reconcile.
