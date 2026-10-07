@@ -2562,7 +2562,7 @@ func TestConfigureDeploymentForStorageCA(t *testing.T) {
 										},
 									},
 									Args: []string{
-										"-s3.http.ca-file=/etc/storage/ca/service-ca.crt",
+										"-common.storage.object-store.s3.http.tls-ca-path=/etc/storage/ca/service-ca.crt",
 									},
 									Env: []corev1.EnvVar{
 										{
@@ -2756,7 +2756,7 @@ func TestConfigureStatefulSetForStorageCA(t *testing.T) {
 										},
 									},
 									Args: []string{
-										"-s3.http.ca-file=/etc/storage/ca/service-ca.crt",
+										"-common.storage.object-store.s3.http.tls-ca-path=/etc/storage/ca/service-ca.crt",
 									},
 									Env: []corev1.EnvVar{
 										{

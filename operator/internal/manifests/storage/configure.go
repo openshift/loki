@@ -278,7 +278,7 @@ func ensureCAForS3(p *corev1.PodSpec, tls *TLSConfig) corev1.PodSpec {
 	})
 
 	container.Args = append(container.Args,
-		fmt.Sprintf("-s3.http.ca-file=%s", path.Join(caDirectory, tls.Key)),
+		fmt.Sprintf("-common.storage.object-store.s3.http.tls-ca-path=%s", path.Join(caDirectory, tls.Key)),
 	)
 
 	return corev1.PodSpec{
