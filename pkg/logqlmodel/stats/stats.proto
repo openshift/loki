@@ -110,6 +110,10 @@ message Summary {
   // This is useful to identify haystack-sized queries when index filtering makes
   // totalBytesProcessed appear much smaller.
   int64 estimatedQueryBytes = 13 [(gogoproto.jsontag) = "estimatedQueryBytes,omitempty"];
+  // Total number of queries the querier ran in stream-first order.
+  int64 streamFirstQueries = 14 [(gogoproto.jsontag) = "streamFirstQueries"];
+  // Total number of queries the querier ran in timestamp-first order.
+  int64 timestampFirstQueries = 15 [(gogoproto.jsontag) = "timestampFirstQueries"];
 }
 
 // Statistics from Index queries
@@ -243,6 +247,10 @@ message Dataobj {
 
   // Total bytes transferred between tasks via scheduler streams (sources and sinks).
   int64 wireBytesTransferred = 14 [(gogoproto.jsontag) = "wireBytesTransferred"];
+
+  // Longest time one data-object read spent resolving sections, in nanoseconds. Results merge it
+  // as a max across reads, not a sum.
+  int64 sectionsResolutionMaxTime = 15 [(gogoproto.jsontag) = "sectionsResolutionMaxTime"];
 }
 
 message Chunk {

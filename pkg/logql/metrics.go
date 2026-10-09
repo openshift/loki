@@ -26,6 +26,7 @@ import (
 	"github.com/grafana/loki/v3/pkg/util/constants"
 	"github.com/grafana/loki/v3/pkg/util/httpreq"
 	util_log "github.com/grafana/loki/v3/pkg/util/log"
+	"github.com/grafana/loki/v3/pkg/util/server"
 	"github.com/grafana/loki/v3/pkg/util/spanlogger"
 )
 
@@ -130,6 +131,7 @@ func RecordRangeAndInstantQueryMetrics(
 	status string,
 	stats logql_stats.Result,
 	result promql_parser.Value,
+	err error,
 ) {
 	var (
 		logger        = fixLogger(ctx, log)
@@ -140,9 +142,9 @@ func RecordRangeAndInstantQueryMetrics(
 		queryTags, _  = ctx.Value(httpreq.QueryTagsHTTPHeader).(string) // it's ok to be empty.
 	)
 
-	queryType, err := QueryType(p.GetExpression())
-	if err != nil {
-		level.Warn(logger).Log("msg", "error parsing query type", "err", err)
+	queryType, queryTypeErr := QueryType(p.GetExpression())
+	if queryTypeErr != nil {
+		level.Warn(logger).Log("msg", "error parsing query type", "err", queryTypeErr)
 	}
 
 	// datasample queries are executed with limited roundtripper
@@ -206,10 +208,13 @@ func RecordRangeAndInstantQueryMetrics(
 		"post_filter_lines", stats.Summary.TotalPostFilterLines,
 		"total_entries", stats.Summary.TotalEntriesReturned,
 		"store_chunks_download_time", stats.ChunksDownloadTime(),
+		"dataobj_sections_resolution_max_time", stats.DataobjSectionsResolutionMaxTime(),
 		"queue_time", logql_stats.ConvertSecondsToNanoseconds(stats.Summary.QueueTime),
 		"querier_exec_time", logql_stats.ConvertSecondsToNanoseconds(stats.Querier.QuerierExecTime),
 		"splits", stats.Summary.Splits,
 		"shards", stats.Summary.Shards,
+		"stream_first_queries", stats.Summary.StreamFirstQueries,
+		"timestamp_first_queries", stats.Summary.TimestampFirstQueries,
 		"query_referenced_structured_metadata", stats.QueryReferencedStructuredMetadata(),
 		"pipeline_wrapper_filtered_lines", stats.PipelineWrapperFilteredLines(),
 		"chunk_refs_fetch_time", stats.ChunkRefsFetchTime(),
@@ -313,6 +318,11 @@ func RecordRangeAndInstantQueryMetrics(
 				"result_lines_count", streams.Lines(),
 			)
 		}
+	}
+
+	if err != nil {
+		category, reason := server.ClassifyFailure(err)
+		logValues = append(logValues, "err", err, "failure_category", category, "failure_reason", reason)
 	}
 
 	level.Info(logger).Log(

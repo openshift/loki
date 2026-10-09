@@ -1714,21 +1714,23 @@ func (d *Distributor) recordsForStreams(
 ) ([]*kgo.Record, error) {
 	records := make([]*kgo.Record, 0, len(streams))
 
-	// TODO(shared-attrs): use nested encoding when delayed attribute expansion is enabled.
 	for _, stream := range streams {
-		// Encode reads the view synchronously without modifying it.
-		flat := stream.Stream.FlatView()
-
 		// TODO(grobinson): Check if this is still needed, I would have expected
 		// streams with no entries to have be removed when the request was validated.
-		if len(flat.Entries) == 0 {
+		if stream.Stream.EntryCount() == 0 {
 			continue
 		}
 		partition, err := subring.ActivePartitionForKey(stream.HashKey)
 		if err != nil {
 			return nil, fmt.Errorf("failed to find partition for stream: %w", err)
 		}
-		streamRecords, err := kafka.Encode(partition, tenant, flat, d.cfg.KafkaConfig.ProducerMaxRecordSizeBytes)
+		var streamRecords []*kgo.Record
+		if d.cfg.OTLPConfig.DeferAttributeExpansion {
+			streamRecords, err = kafka.EncodeInternal(partition, tenant, stream.Stream, d.cfg.KafkaConfig.ProducerMaxRecordSizeBytes)
+		} else {
+			// Encode reads the view synchronously without modifying it.
+			streamRecords, err = kafka.Encode(partition, tenant, stream.Stream.FlatView(), d.cfg.KafkaConfig.ProducerMaxRecordSizeBytes)
+		}
 		if err != nil {
 			return nil, fmt.Errorf("failed to marshal streams to records: %w", err)
 		}
@@ -1808,21 +1810,25 @@ func (d *Distributor) shardCountFor(logger log.Logger, stream logproto.InternalS
 		pushRate = 1
 	}
 
-	shards := calculateShards(rate, int(float64(pushSize)*pushRate), streamShardcfg.DesiredRate.Val())
-	if shards == 0 {
-		// 1 shard is enough for the given stream.
-		return 1
+	n, capped := calculateShards(rate, int(float64(pushSize)*pushRate), streamShardcfg.DesiredRate.Val(), streamShardcfg.MaxShardCount)
+	if capped {
+		d.m.rateStoreMaxShardsLimited.WithLabelValues(tenantID).Inc()
 	}
-
-	return shards
+	return n
 }
 
-func calculateShards(rate int64, pushSize, desiredRate int) int {
+func calculateShards(rate int64, pushSize, desiredRate, maxShardCount int) (n int, capped bool) {
 	shards := float64(rate+int64(pushSize)) / float64(desiredRate)
 	if shards <= 1 {
-		return 1
+		return 1, false
 	}
-	return int(math.Ceil(shards))
+	n = int(math.Ceil(shards))
+	if maxShardCount > 0 && n > maxShardCount {
+		n = maxShardCount
+		capped = true
+	}
+	n = max(n, 1) // minumum number of shards is 1
+	return
 }
 
 func nestedStreamSize(s logproto.InternalStreamAdapter) int {
