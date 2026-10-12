@@ -2,6 +2,7 @@ package openshift
 
 import (
 	"fmt"
+	"strings"
 
 	"dario.cat/mergo"
 	"github.com/ViaQ/logerr/v2/kverrors"
@@ -245,17 +246,27 @@ func ConfigureRulerStatefulSet(
 	return nil
 }
 
+// AlertGeneratorURL returns the OpenShift Console Observe → Logs URL used as
+// Alertmanager generatorURL / email Source.
+func AlertGeneratorURL(consoleURL string) string {
+	consoleURL = strings.TrimRight(consoleURL, "/")
+	if consoleURL == "" {
+		return ""
+	}
+	return consoleURL + "/monitoring/logs"
+}
+
 // ConfigureOptions applies default configuration for the use of the cluster monitoring alertmanager.
-func ConfigureOptions(configOpt *config.Options, am, uwam bool, token, caPath, monitorServerName string) error {
+func ConfigureOptions(configOpt *config.Options, am, uwam bool, token, caPath, monitorServerName, consoleURL string) error {
 	if am {
-		err := configureDefaultMonitoringAM(configOpt)
+		err := configureDefaultMonitoringAM(configOpt, consoleURL)
 		if err != nil {
 			return err
 		}
 	}
 
 	if uwam {
-		err := configureUserWorkloadAM(configOpt, token, caPath, monitorServerName)
+		err := configureUserWorkloadAM(configOpt, token, caPath, monitorServerName, consoleURL)
 		if err != nil {
 			return err
 		}
@@ -264,7 +275,7 @@ func ConfigureOptions(configOpt *config.Options, am, uwam bool, token, caPath, m
 	return nil
 }
 
-func configureDefaultMonitoringAM(configOpt *config.Options) error {
+func configureDefaultMonitoringAM(configOpt *config.Options, consoleURL string) error {
 	if configOpt.Ruler.AlertManager == nil {
 		configOpt.Ruler.AlertManager = &config.AlertManagerConfig{}
 	}
@@ -282,10 +293,14 @@ func configureDefaultMonitoringAM(configOpt *config.Options) error {
 		}
 	}
 
+	if configOpt.Ruler.AlertManager.ExternalURL == "" {
+		configOpt.Ruler.AlertManager.ExternalURL = AlertGeneratorURL(consoleURL)
+	}
+
 	return nil
 }
 
-func configureUserWorkloadAM(configOpt *config.Options, token, caPath, monitorServerName string) error {
+func configureUserWorkloadAM(configOpt *config.Options, token, caPath, monitorServerName, consoleURL string) error {
 	if configOpt.Overrides == nil {
 		configOpt.Overrides = map[string]config.LokiOverrides{}
 	}
@@ -296,11 +311,20 @@ func configureUserWorkloadAM(configOpt *config.Options, token, caPath, monitorSe
 		return nil
 	}
 
+	externalURL := ""
+	if configOpt.Ruler.AlertManager != nil {
+		externalURL = configOpt.Ruler.AlertManager.ExternalURL
+	}
+	if externalURL == "" {
+		externalURL = AlertGeneratorURL(consoleURL)
+	}
+
 	lokiOverrides.Ruler.AlertManager = &config.AlertManagerConfig{
 		Hosts:           fmt.Sprintf("https://_web._tcp.%s.%s.svc", MonitoringSVCOperated, MonitoringUserWorkloadNS),
 		EnableV2:        true,
 		EnableDiscovery: true,
 		RefreshInterval: "1m",
+		ExternalURL:     externalURL,
 		Notifier: &config.NotifierConfig{
 			TLS: config.TLSConfig{
 				ServerName: ptr.To(monitorServerName),

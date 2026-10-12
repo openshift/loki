@@ -271,7 +271,7 @@ func DefaultTenantManagerFactory(cfg Config, p Pusher, q storage.Queryable, engi
 			QueryFunc:       RecordAndReportRuleQueryMetrics(MetricsQueryFunc(rules.EngineQueryFunc(engine, q), totalQueries, failedQueries), queryTime, logger),
 			Context:         user.InjectOrgID(ctx, userID),
 			ExternalURL:     cfg.ExternalURL.URL,
-			NotifyFunc:      SendAlerts(notifier, cfg.ExternalURL.URL.String(), cfg.DatasourceUID),
+			NotifyFunc:      SendAlerts(notifier, cfg.ExternalURL.URL.String(), cfg.DatasourceUID, userID),
 			Logger:          util_log.SlogFromGoKit(log.With(logger, "user", userID)),
 			Registerer:      reg,
 			OutageTolerance: cfg.OutageTolerance,

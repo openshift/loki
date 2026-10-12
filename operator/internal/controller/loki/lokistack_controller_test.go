@@ -224,7 +224,7 @@ func TestLokiStackController_RegisterWatchedResources(t *testing.T) {
 		{
 			src:               &openshiftconfigv1.APIServer{},
 			index:             3,
-			watchesCallsCount: 4,
+			watchesCallsCount: 5,
 			featureGates: configv1.FeatureGates{
 				OpenShift: configv1.OpenShiftFeatureGates{
 					Enabled:          true,
@@ -236,11 +236,22 @@ func TestLokiStackController_RegisterWatchedResources(t *testing.T) {
 		{
 			src:               &openshiftconfigv1.Proxy{},
 			index:             3,
-			watchesCallsCount: 4,
+			watchesCallsCount: 5,
 			featureGates: configv1.FeatureGates{
 				OpenShift: configv1.OpenShiftFeatureGates{
 					Enabled:      true,
 					ClusterProxy: true,
+				},
+			},
+			pred: updateOrDeleteOnlyPred,
+		},
+		{
+			src:               &openshiftconfigv1.Console{},
+			index:             3,
+			watchesCallsCount: 4,
+			featureGates: configv1.FeatureGates{
+				OpenShift: configv1.OpenShiftFeatureGates{
+					Enabled: true,
 				},
 			},
 			pred: updateOrDeleteOnlyPred,

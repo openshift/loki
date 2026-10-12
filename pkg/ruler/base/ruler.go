@@ -396,6 +396,8 @@ type datasource struct {
 	UID  string `json:"uid"`
 }
 
+const openshiftLogsPath = "/monitoring/logs"
+
 func grafanaLinkForExpression(expr, datasourceUID string) string {
 	exprStruct := query{
 		Expr:      expr,
@@ -415,11 +417,35 @@ func grafanaLinkForExpression(expr, datasourceUID string) string {
 	return `/explore?` + params.Encode()
 }
 
+func isOpenShiftLogsURL(u *url.URL) bool {
+	return u != nil && u.Scheme != "" && u.Host != "" && strings.TrimRight(u.Path, "/") == openshiftLogsPath
+}
+
+func openshiftLogsLink(u *url.URL, expr, tenantID string) string {
+	out := *u
+	out.Path = openshiftLogsPath
+	q := out.Query()
+	q.Set("q", expr)
+	if tenantID != "" {
+		q.Set("tenant", tenantID)
+	}
+	out.RawQuery = q.Encode()
+	out.Fragment = ""
+	return out.String()
+}
+
+func alertGeneratorURL(externalURL, expr, datasourceUID, tenantID string) string {
+	if u, err := url.Parse(externalURL); err == nil && isOpenShiftLogsURL(u) {
+		return openshiftLogsLink(u, expr, tenantID)
+	}
+	return externalURL + grafanaLinkForExpression(expr, datasourceUID)
+}
+
 // SendAlerts implements a rules.NotifyFunc for a Notifier.
 // It filters any non-firing alerts from the input.
 //
 // Copied from Prometheus's main.go.
-func SendAlerts(n sender, externalURL, datasourceUID string) promRules.NotifyFunc {
+func SendAlerts(n sender, externalURL, datasourceUID, tenantID string) promRules.NotifyFunc {
 	return func(_ context.Context, expr string, alerts ...*promRules.Alert) {
 		var res []*notifier.Alert
 
@@ -428,7 +454,7 @@ func SendAlerts(n sender, externalURL, datasourceUID string) promRules.NotifyFun
 				StartsAt:     alert.FiredAt,
 				Labels:       alert.Labels,
 				Annotations:  alert.Annotations,
-				GeneratorURL: externalURL + grafanaLinkForExpression(expr, datasourceUID),
+				GeneratorURL: alertGeneratorURL(externalURL, expr, datasourceUID, tenantID),
 			}
 			if !alert.ResolvedAt.IsZero() {
 				a.EndsAt = alert.ResolvedAt
