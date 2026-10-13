@@ -387,15 +387,15 @@ One or more Loki ingesters are failing to flush at least 20% of their chunks to 
   - **For Capacity Issues**: Increase storage size/IOPS or implement lifecycle policies
   - **For Configuration Issues**: Correct the LokiStack storage configuration and wait for a restart of the ingesters
 
-## Lokistack Storage Schema Warning
+## Lokistack Schema Upgrades Required
 
 ### Impact
 
-The LokiStack warns on a newer object storage schema being available for configuration.
+The LokiStack contains older v11 or v12 storage schemas that are deprecated and will not be supported in future operator versions.
 
 ### Summary
 
-The schema configuration does not contain the most recent schema version and needs an update.
+The schema configuration contains deprecated v11 or v12 schemas. These schemas must be migrated to v13 before upgrading to the next major operator version (6.7+).
 
 ### Severity
 
@@ -410,7 +410,16 @@ The schema configuration does not contain the most recent schema version and nee
 
 ### Steps
 
-- Add a new object storage schema V13 with a future EffectiveDate
+Follow the detailed migration guide to migrate from v11/v12 schemas to v13:
+https://loki-operator.dev/docs/user-guides/migrate-to-v13-schemas.md/
+
+Summary of migration steps:
+1. Add a new object storage schema v13 with a future EffectiveDate
+2. Wait for the effective date to pass and v13 to become active
+3. Wait for the retention period to expire for old data
+4. Remove all v11/v12 schema entries from the LokiStack spec
+
+**Important**: You must complete this migration before upgrading to operator version 6.7 or later, which will reject LokiStacks with v11/v12 schemas.
 
 ## Lokistack Components Not Ready Warning
 
