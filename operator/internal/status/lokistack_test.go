@@ -253,16 +253,32 @@ func TestGenerateWarningCondition_WhenStorageSchemaIsOld(t *testing.T) {
 			}},
 		},
 		{
-			desc: "with V13 as the last element in schema config",
+			desc: "with V13 as the last element but older v11/v12 schemas present",
 			schemas: []lokiv1.ObjectStorageSchema{
 				{
+					//nolint:staticcheck
 					Version:       lokiv1.ObjectStorageSchemaV11,
 					EffectiveDate: "2020-10-11",
 				},
 				{
+					//nolint:staticcheck
 					Version:       lokiv1.ObjectStorageSchemaV12,
 					EffectiveDate: "2023-10-11",
 				},
+				{
+					Version:       lokiv1.ObjectStorageSchemaV13,
+					EffectiveDate: "2024-10-11",
+				},
+			},
+			wantCondition: []metav1.Condition{{
+				Type:    string(lokiv1.ConditionWarning),
+				Reason:  string(lokiv1.ReasonStorageNeedsSchemaUpdate),
+				Message: messageWarningNeedsSchemaVersionUpdate,
+			}},
+		},
+		{
+			desc: "with only V13 schemas (no deprecated schemas)",
+			schemas: []lokiv1.ObjectStorageSchema{
 				{
 					Version:       lokiv1.ObjectStorageSchemaV13,
 					EffectiveDate: "2024-10-11",
