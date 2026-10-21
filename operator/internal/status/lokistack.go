@@ -32,7 +32,7 @@ const (
 	messageRunning                         = "All components are running, but some readiness checks are failing"
 	messageDegradedMissingNodes            = "Cluster contains no nodes matching the labels used for zone-awareness"
 	messageDegradedEmptyNodeLabel          = "No value for the labels used for zone-awareness"
-	messageWarningNeedsSchemaVersionUpdate = "The schema configuration does not contain the most recent schema version and needs an update"
+	messageWarningNeedsSchemaVersionUpdate = "The schema configuration contains older v11 or v12 schemas. These schemas are deprecated and will not be supported in future operator versions. You must migrate all schemas to v13 before upgrading to the next major operator version."
 )
 
 var (
@@ -192,12 +192,18 @@ func generateWarnings(stack *lokiv1.LokiStack) []metav1.Condition {
 	warnings := make([]metav1.Condition, 0, 2)
 	schemas := stack.Spec.Storage.Schemas
 
-	if len(schemas) > 0 && schemas[len(schemas)-1].Version != lokiv1.ObjectStorageSchemaV13 {
-		warnings = append(warnings, metav1.Condition{
-			Type:    string(lokiv1.ConditionWarning),
-			Reason:  string(lokiv1.ReasonStorageNeedsSchemaUpdate),
-			Message: messageWarningNeedsSchemaVersionUpdate,
-		})
+	// Check for any deprecated v11 or v12 schemas in the configuration.
+	// These schemas are deprecated and will be rejected in future operator versions.
+	for _, schema := range schemas {
+		//nolint:staticcheck
+		if schema.Version == lokiv1.ObjectStorageSchemaV11 || schema.Version == lokiv1.ObjectStorageSchemaV12 {
+			warnings = append(warnings, metav1.Condition{
+				Type:    string(lokiv1.ConditionWarning),
+				Reason:  string(lokiv1.ReasonStorageNeedsSchemaUpdate),
+				Message: messageWarningNeedsSchemaVersionUpdate,
+			})
+			break
+		}
 	}
 
 	// Check if the ingester's replicas are less than or equal to the replication factor
