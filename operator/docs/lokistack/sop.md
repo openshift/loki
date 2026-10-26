@@ -412,7 +412,7 @@ The schema configuration contains deprecated v11 or v12 schemas. The configurati
 
 ### Steps
 
-There is a [more detailed migration guide](https://loki-operator.dev/docs/user-guides/migrate-to-v13-schemas.md/) available for this operation.
+There is a [more detailed migration guide](https://loki-operator.dev/docs/user-guides/migrate-to-v13-schemas/) available for this operation.
 
 Summary of migration steps:
 1. Add a new object storage schema v13 with a future EffectiveDate and make sure the LokiStack has a set retention

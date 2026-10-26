@@ -32,7 +32,7 @@ const (
 	messageRunning                         = "All components are running, but some readiness checks are failing"
 	messageDegradedMissingNodes            = "Cluster contains no nodes matching the labels used for zone-awareness"
 	messageDegradedEmptyNodeLabel          = "No value for the labels used for zone-awareness"
-	messageWarningNeedsSchemaVersionUpdate = "The schema configuration contains older v11 or v12 schemas. These schemas are deprecated and will not be supported in future operator versions. You must migrate all schemas to v13 before upgrading to the next major operator version."
+	messageWarningNeedsSchemaVersionUpdate = "The schema configuration contains older v11 or v12 schemas. These schemas are deprecated and will not be supported in future operator versions. You must migrate all schemas to v13 before upgrading to an operator version supporting Loki 4."
 )
 
 var (
