@@ -90,6 +90,15 @@ func BuildOptions(
 		return nil, nil, ruler, ocpOpts, err
 	}
 
+	consoleURL := ""
+	if stack.Spec.Tenants != nil && (stack.Spec.Tenants.Mode == lokiv1.OpenshiftLogging || stack.Spec.Tenants.Mode == lokiv1.OpenshiftNetwork) {
+		consoleURL, err = openshift.GetConsoleURL(ctx, k)
+		if err != nil {
+			log.Error(err, "failed to lookup OpenShift Console URL")
+			return nil, nil, ruler, ocpOpts, err
+		}
+	}
+
 	ruler = manifests.Ruler{
 		Spec:   rulerConfig,
 		Secret: rulerSecret,
@@ -99,6 +108,7 @@ func BuildOptions(
 		BuildOpts: manifestsocp.BuildOptions{
 			AlertManagerEnabled:             ocpAmEnabled,
 			UserWorkloadAlertManagerEnabled: ocpUWAmEnabled,
+			ConsoleURL:                      consoleURL,
 		},
 	}
 

@@ -164,7 +164,7 @@ func MultiTenantRuleManager(cfg Config, evaluator Evaluator, overrides RulesLimi
 			QueryFunc:                queryFn,
 			Context:                  user.InjectOrgID(ctx, userID),
 			ExternalURL:              cfg.ExternalURL.URL,
-			NotifyFunc:               ruler.SendAlerts(notifier, cfg.ExternalURL.URL.String(), cfg.DatasourceUID),
+			NotifyFunc:               ruler.SendAlerts(notifier, cfg.ExternalURL.URL.String(), cfg.DatasourceUID, userID),
 			Logger:                   util_log.SlogFromGoKit(logger),
 			Registerer:               reg,
 			OutageTolerance:          cfg.OutageTolerance,
