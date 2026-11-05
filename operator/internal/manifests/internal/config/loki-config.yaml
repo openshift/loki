@@ -42,6 +42,7 @@ common:
         bucket_lookup_type: path
         {{- end}}
         {{- end }}
+        dualstack_enabled: false
         {{- with .SSE }}
         {{- if .Type }}
         sse:
