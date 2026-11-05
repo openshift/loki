@@ -13,6 +13,7 @@ common:
         endpoint: s3.my-region.amazonaws.com
         native_aws_auth_enabled: true
         region: my-region
+        dualstack_enabled: false
   compactor_grpc_address: loki-compactor-grpc-lokistack-dev.default.svc.cluster.local:9095
   ring:
     kvstore:
