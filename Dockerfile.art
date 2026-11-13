@@ -15,7 +15,7 @@ COPY . .
 RUN touch loki-build-image/.uptodate && mkdir -p /build
 RUN go build -ldflags "-s -w -X ${LOKI_VPREFIX}.Branch=upstream-v${BUILD_VERSION} -X ${LOKI_VPREFIX}.Version=v${BUILD_VERSION} -X ${LOKI_VPREFIX}.Revision=${SOURCE_GIT_COMMIT} -X ${LOKI_VPREFIX}.BuildDate=$(date -u +"%Y-%m-%dT%H:%M:%SZ")" -tags strictfipsruntime -o cmd/loki/loki ./cmd/loki/
 
-FROM registry.access.redhat.com/ubi9-micro:9.8
+FROM registry.access.redhat.com/ubi9-minimal:9.8
 
 COPY --from=builder /go/src/github.com/grafana/loki/cmd/loki/loki /usr/bin/loki
 COPY --from=builder /go/src/github.com/grafana/loki/cmd/loki/loki-docker-config.yaml /etc/loki/local-config.yaml
